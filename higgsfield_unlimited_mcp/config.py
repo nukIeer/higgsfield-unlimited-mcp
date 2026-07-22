@@ -14,6 +14,30 @@ API_BASE = "https://fnf.higgsfield.ai"
 PLATFORM_BASE = "https://higgsfield.ai"
 
 
+def _load_dotenv() -> None:
+    """Minimal, dependency-free .env loader.
+
+    Looks for a .env file in the current directory (or HIGGSFIELD_DOTENV) and
+    sets any keys not already present in the environment. Existing env vars win,
+    so MCP-config `env` blocks always take precedence.
+    """
+    path = Path(os.environ.get("HIGGSFIELD_DOTENV", ".env"))
+    if not path.is_file():
+        return
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        pass
+
+
 def _get_bool(name: str, default: bool = False) -> bool:
     val = os.environ.get(name)
     if val is None:
@@ -34,6 +58,12 @@ class Config:
 
     clerk_cookie: str = field(default_factory=lambda: os.environ.get("HIGGSFIELD_CLERK_COOKIE", ""))
     session_id: str = field(default_factory=lambda: os.environ.get("HIGGSFIELD_SESSION_ID", ""))
+    # Extra cookies to forward to the API (e.g. a `datadome` session cookie your
+    # browser already holds). Raw cookie string form: "datadome=xxx; foo=bar".
+    # This reuses your existing browser session; it does not solve challenges.
+    extra_cookies: str = field(
+        default_factory=lambda: os.environ.get("HIGGSFIELD_EXTRA_COOKIES", "")
+    )
     max_concurrent: int = field(default_factory=lambda: _get_int("HIGGSFIELD_MAX_CONCURRENT", 4))
     default_model: str = field(
         default_factory=lambda: os.environ.get("HIGGSFIELD_DEFAULT_MODEL", "nano-banana-2")
@@ -81,5 +111,6 @@ def get_config() -> Config:
     """Return the process-wide config singleton."""
     global _config
     if _config is None:
+        _load_dotenv()
         _config = Config()
     return _config

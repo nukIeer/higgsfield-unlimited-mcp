@@ -126,10 +126,20 @@ class HiggsfieldClient:
             timeout=config.request_timeout,
             follow_redirects=True,
             headers={
-                "User-Agent": "higgsfield-unlimited-mcp/0.1.0",
-                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
                 "Origin": "https://higgsfield.ai",
                 "Referer": "https://higgsfield.ai/",
+                "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-site",
             },
         )
         self.auth = ClerkAuth(config, self._http)
@@ -152,6 +162,10 @@ class HiggsfieldClient:
         for attempt in (1, 2):
             jwt = await self.auth.get_jwt(force=(attempt == 2))
             headers = {"Authorization": f"Bearer {jwt}"}
+            if self._config.extra_cookies:
+                # Forward the browser's existing session cookies (e.g. datadome)
+                # so the account's own session is recognised.
+                headers["Cookie"] = self._config.extra_cookies
             resp = await self._http.request(
                 method, url, json=json, params=params, headers=headers
             )
