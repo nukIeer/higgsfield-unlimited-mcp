@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Local MCP config (machine-specific absolute paths)
+.mcp.json
+
 # Generated output
 higgsfield_output/
 *.png
