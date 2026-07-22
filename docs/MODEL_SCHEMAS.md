@@ -80,6 +80,21 @@ uploaded on one account, they only work on that account, so the pool uploads loc
 `input_files` on whichever account runs the job. To reuse a pre-uploaded id, pin the
 job with `account=` on `generate_image` / `generate_video`.
 
+### Text-to-speech (v2)
+
+`POST /jobs/v2/text2speech_v2` (verified):
+
+```json
+{ "params": { "prompt": "metin", "model": "elevenlabs",
+              "voice_id": "b0f766b7-...", "voice_type": "preset", "use_unlim": true },
+  "use_unlim": true }
+```
+
+Voice ids come from `GET /reference-elements/voices` → `{items:[{id, name, gender,
+source(preview mp3), type:"preset"}]}`. ElevenLabs is multilingual, so a Turkish prompt
+works with any voice. The result mp3 is at `.../hf_..._{jobid}.mp3` (the `voice.source`
+in params is the preview, not the output — result extraction ignores `source`).
+
 ## `use_unlim` is enforced server-side, per model + account
 
 Setting `use_unlim: true` does **not** guarantee unlimited generation. The server

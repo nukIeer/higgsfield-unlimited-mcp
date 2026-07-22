@@ -520,26 +520,62 @@ async def generate_video(
 # Audio generation
 # ======================================================================= #
 @mcp.tool()
+async def list_voices(size: int = 50, account: str | int | None = None) -> str:
+    """List TTS preset voices (id, name, gender, preview mp3) for generate_audio.
+
+    Reads GET /reference-elements/voices. Pick a voice `id` and pass it to
+    generate_audio as `voice_id`. Turkish voiceover: choose a voice and write the
+    prompt in Turkish — ElevenLabs is multilingual.
+    """
+    try:
+        svc = _pool().services[account] if isinstance(account, int) else _svc()
+        res = await svc.try_get(["/reference-elements/voices"], params={"size": size})
+        data = res.get("data") or {}
+        items = data.get("items", []) if isinstance(data, dict) else []
+        voices = [
+            {"id": v.get("id"), "name": v.get("name"), "gender": v.get("gender"),
+             "preview": v.get("source")}
+            for v in items
+        ]
+        return _jdump({"count": len(voices), "voices": voices})
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
 async def generate_audio(
     text: str,
-    model: str = "text2speech",
-    voice: str | None = None,
+    voice_id: str | None = None,
+    tts_model: str = "elevenlabs",
+    voice_type: str = "preset",
+    model: str = "text2speech_v2",
+    account: str | int | None = None,
     extra_params: dict[str, Any] | None = None,
     wait: bool = True,
     download: bool = True,
     timeout: float = 300.0,
 ) -> str:
-    """Text-to-speech via the text2speech model."""
+    """Text-to-speech (unlimited) via the v2 text2speech_v2 model.
+
+    Verified contract: params {prompt, model:"elevenlabs", voice_id, voice_type:"preset"}.
+    Get a `voice_id` from `list_voices`. Works with Turkish (and other languages) text.
+    """
     try:
         async def _submit(svc: Service):
-            params: dict[str, Any] = {"text": text}
-            if voice:
-                params["voice"] = voice
+            params: dict[str, Any] = {
+                "prompt": text,
+                "model": tts_model,
+                "voice_type": voice_type,
+            }
+            if voice_id:
+                params["voice_id"] = voice_id
             if extra_params:
                 params.update(extra_params)
-            return await svc.submit(model=model, params=params, kind="audio", prompt=text[:80])
+            return await svc.submit_v2(model=model, params=params, kind="audio", prompt=text[:80])
 
-        result = await _pool().run_job(_submit, wait=wait, download=download, timeout=timeout)
+        result = await _pool().run_job(
+            _submit, wait=wait, download=download, timeout=timeout, account=account
+        )
         return _jdump(result)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)

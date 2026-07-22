@@ -99,8 +99,9 @@ _VIDEO_MODELS = [
 # capture or generate_raw.
 # --------------------------------------------------------------------------- #
 _AUDIO_MODELS = [
-    ModelSpec("text2speech", CATEGORY_AUDIO, "v2", True, "Text to Speech V2."),
-    ModelSpec("mirelo_text2audio", CATEGORY_AUDIO, "v2", True, "Mirelo Text to Audio."),
+    ModelSpec("text2speech_v2", CATEGORY_AUDIO, "v2", True,
+              "Text to Speech V2 (params: prompt, model=elevenlabs, voice_id, voice_type)."),
+    ModelSpec("mirelo_text2audio", CATEGORY_AUDIO, "v2", True, "Mirelo Text to Audio (sfx/music)."),
     ModelSpec("inworld_tts", CATEGORY_AUDIO, "v2", True, "Inworld Text to Speech."),
     ModelSpec("seed_audio", CATEGORY_AUDIO, "v2", True, "Seed Audio 1.0."),
 ]
