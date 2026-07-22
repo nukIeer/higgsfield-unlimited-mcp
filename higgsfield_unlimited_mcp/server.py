@@ -217,6 +217,7 @@ async def generate_image(
     batch_size: int = 1,
     input_files: list[str] | None = None,
     input_images: list[str] | None = None,
+    account: str | int | None = None,
     extra_params: dict[str, Any] | None = None,
     wait: bool = True,
     download: bool = True,
@@ -244,7 +245,9 @@ async def generate_image(
             submit = svc.submit_v2 if api_version == "v2" else svc.submit
             return await submit(model=model, params=params, kind="image", prompt=prompt)
 
-        result = await _pool().run_job(_submit, wait=wait, download=download, timeout=timeout)
+        result = await _pool().run_job(
+            _submit, wait=wait, download=download, timeout=timeout, account=account
+        )
         return _jdump(result)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -383,6 +386,7 @@ async def generate_video(
     generate_audio: bool = True,
     mode: str | None = "std",
     seed: int | None = None,
+    account: str | int | None = None,
     extra_params: dict[str, Any] | None = None,
     wait: bool = True,
     download: bool = True,
@@ -435,7 +439,7 @@ async def generate_video(
 
             try:
                 result = await _pool().run_job(
-                    _submit, wait=wait, download=download, timeout=timeout
+                    _submit, wait=wait, download=download, timeout=timeout, account=account
                 )
             except HiggsfieldError as exc:
                 res_attempts.append({"resolution": res, "status": exc.status,

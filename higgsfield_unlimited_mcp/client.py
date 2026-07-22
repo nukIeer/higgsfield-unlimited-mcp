@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import time
 from pathlib import Path
 from typing import Any
 
@@ -276,57 +277,74 @@ class HiggsfieldClient:
     # --------------------------------------------------------------------- #
     # Media upload (local file -> hosted URL usable as input_images)
     # --------------------------------------------------------------------- #
-    async def upload_file(self, file_path: str | Path) -> dict[str, Any]:
-        """Upload a local image/video and return the hosted media descriptor.
+    async def upload_file(
+        self, file_path: str | Path, wait_ip_check: bool = True
+    ) -> dict[str, Any]:
+        """Upload a local image/video and return its media descriptor {id, url, ...}.
 
-        Higgsfield issues a presigned upload target, we PUT the bytes, then
-        register the media. Endpoint shapes vary; this implements the common
-        presign->PUT->confirm flow and falls back to a direct multipart upload.
+        Implements Higgsfield's real 3-step flow (captured from traffic):
+          1. POST /media/batch  -> [{id, url, upload_url}] (presigned S3 target)
+          2. PUT  <upload_url>  with the raw bytes + Content-Type
+          3. POST /media/{id}/upload  -> finalises + starts NSFW/IP checks
+
+        The returned ``url`` is the public CDN URL to use in
+        ``input_images``/``medias`` as ``{id, type: "media_input", url}``.
         """
         path = Path(file_path).expanduser()
         if not path.is_file():
             raise HiggsfieldError(f"File not found: {path}")
         data = path.read_bytes()
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        content_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
 
-        # 1) Ask for a presigned upload URL.
-        presign = await self.post(
-            "/media/upload-url",
-            json={"filename": path.name, "content_type": content_type, "size": len(data)},
+        # 1) Reserve a media slot + presigned upload URL.
+        batch = await self.post(
+            "/media/batch",
+            json={"mimetypes": [content_type], "source": "user_upload", "force_ip_check": False},
         )
-        upload_url = _first(presign or {}, ("upload_url", "url", "put_url"))
-        media_url = _first(presign or {}, ("public_url", "cdn_url", "media_url", "download_url"))
-        media_id = _first(presign or {}, _ID_KEYS)
+        if not isinstance(batch, list) or not batch:
+            raise HiggsfieldError(f"/media/batch returned no slot: {batch}")
+        slot = batch[0]
+        media_id = slot.get("id")
+        public_url = slot.get("url")
+        upload_url = slot.get("upload_url")
+        if not (media_id and public_url and upload_url):
+            raise HiggsfieldError(f"/media/batch slot missing fields: {slot}")
 
-        if upload_url:
-            put = await self._http.put(
-                upload_url, content=data, headers={"Content-Type": content_type}
+        # 2) PUT the bytes to S3. The presigned URL signs content-type + host.
+        put = await self._http.put(
+            upload_url, content=data, headers={"Content-Type": content_type}
+        )
+        if put.status_code >= 400:
+            raise HiggsfieldError(
+                f"Presigned S3 upload failed ({put.status_code}): {put.text[:200]}",
+                status=put.status_code,
             )
-            if put.status_code >= 400:
-                raise HiggsfieldError(
-                    f"Presigned upload PUT failed ({put.status_code})", status=put.status_code
-                )
-            # 2) Confirm/register if the API expects it.
-            if media_id:
-                try:
-                    await self.post("/media/confirm", json={"id": media_id})
-                except HiggsfieldError:
-                    pass  # some deployments don't require a confirm step
-            return {"id": media_id, "url": media_url or upload_url.split("?")[0]}
 
-        # Fallback: direct multipart upload.
-        jwt = await self.auth.get_jwt()
-        resp = await self._http.post(
-            f"{API_BASE}/media",
-            headers={"Authorization": f"Bearer {jwt}"},
-            files={"file": (path.name, data, content_type)},
+        # 3) Finalise — triggers NSFW/IP checks.
+        await self.post(
+            f"/media/{media_id}/upload",
+            json={"filename": path.name, "force_nsfw_check": True, "force_ip_check": False},
         )
-        result = self._handle_response(resp, expect_json=True)
-        return {
-            "id": extract_job_id(result),
-            "url": _first(result or {}, _URL_KEYS),
-            "raw": result,
-        }
+
+        if wait_ip_check:
+            await self._await_media_ready(media_id)
+
+        return {"id": media_id, "url": public_url, "type": "media_input"}
+
+    async def _await_media_ready(self, media_id: str, timeout: float = 60.0) -> None:
+        """Poll until the media's IP/NSFW check finishes (best-effort)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                info = await self.get(f"/media/{media_id}")
+            except HiggsfieldError:
+                return
+            if isinstance(info, dict):
+                done = info.get("ip_check_finished")
+                status = str(info.get("status", "")).lower()
+                if done or status in ("ready", "processed", "completed"):
+                    return
+            await asyncio.sleep(3)
 
     # --------------------------------------------------------------------- #
     # File download

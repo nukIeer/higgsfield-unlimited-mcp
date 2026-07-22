@@ -236,6 +236,12 @@ Unlimited-eligible video models on a 1-day-unlimited Plus plan: `seedance_2_0`,
 `seedance_2_0_mini`, `wan2_7`, `gemini_omni`, `kling3_0`. A `429` (rate limit) is **not**
 a resolution problem — the pool fails it over to another account instead of downgrading.
 
+**Image-to-video:** pass `input_files=["./frame.png"]` — the file is uploaded on the
+generating account (3-step presigned flow + IP/NSFW check) and attached as the
+`start_image`. `kling3_0` and `seedance_2_0` both do image-to-video well. Pin a job to a
+specific account with `account="account-2"` (or an index) when you want a particular
+login — required if you pass a pre-uploaded media id, since ids are account-scoped.
+
 ## Configuration reference
 
 | Variable | Default | Description |

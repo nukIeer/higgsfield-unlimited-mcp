@@ -61,6 +61,25 @@ for Seedance). Image-to-video attaches a start frame via
 or the job fails `400 {"error_type":"other","text":"IP check not finished for input media"}` —
 text-to-video has no such dependency.
 
+## Uploading input media (for image-to-image / image-to-video)
+
+Local files become usable input media via a 3-step flow (`media_upload` /
+`input_files` do this automatically, per generating account):
+
+1. `POST /media/batch` — `{"mimetypes":["image/jpeg"],"source":"user_upload","force_ip_check":false}`
+   → `[{id, url, upload_url}]` (`upload_url` is a presigned S3 PUT target).
+2. `PUT <upload_url>` — the raw bytes with `Content-Type: image/jpeg` (the signature
+   covers `content-type;host`).
+3. `POST /media/{id}/upload` — `{"filename":..., "force_nsfw_check":true, "force_ip_check":false}`
+   → `{id, status:"uploaded", ip_check_finished:null}`; poll `GET /media/{id}` until
+   `ip_check_finished`.
+
+Then reference it as `{id, type:"media_input", url}` (v1 `input_images`) or
+`{role:"start_image", data:{...}}` (v2 `medias`). Media ids are **account-scoped** —
+uploaded on one account, they only work on that account, so the pool uploads local
+`input_files` on whichever account runs the job. To reuse a pre-uploaded id, pin the
+job with `account=` on `generate_image` / `generate_video`.
+
 ## `use_unlim` is enforced server-side, per model + account
 
 Setting `use_unlim: true` does **not** guarantee unlimited generation. The server

@@ -81,6 +81,19 @@ class Pool:
         self._cooldown_until[idx] = time.monotonic() + _COOLDOWN_SECONDS
 
     # ------------------------------------------------------------------ #
+    def _resolve_account(self, account: str | int | None) -> list[int]:
+        """Turn an account selector into candidate indices (ordered)."""
+        if account is None:
+            return self._order()
+        if isinstance(account, int):
+            if 0 <= account < len(self.services):
+                return [account]
+        else:
+            for i, label in enumerate(self.labels):
+                if label == account or account in label:
+                    return [i]
+        return []
+
     async def run_job(
         self,
         submit: Callable[[Service], Awaitable[JobRecord]],
@@ -89,16 +102,24 @@ class Pool:
         download: bool,
         timeout: float,
         out_dir: Path | None = None,
+        account: str | int | None = None,
     ) -> dict[str, Any]:
         """Submit one job with cross-account failover, then optionally wait + download.
 
         ``submit`` is a coroutine factory that performs the actual submit on a given
-        service (so image=v1, video=v2, etc. all reuse this).
+        service (so image=v1, video=v2, etc. all reuse this). ``account`` pins to a
+        specific account (label or index) and disables failover — use it when the job
+        references media that only one account owns.
         """
         attempts: list[dict[str, Any]] = []
         last_exc: HiggsfieldError | None = None
 
-        for idx in self._order():
+        candidates = self._resolve_account(account)
+        if not candidates:
+            return {"error": f"Unknown account selector: {account!r}",
+                    "available": self.labels}
+
+        for idx in candidates:
             svc = self.services[idx]
             label = self.labels[idx]
             try:
