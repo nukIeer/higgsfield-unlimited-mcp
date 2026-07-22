@@ -191,6 +191,7 @@ Or from inside Claude Code:
 |----------|---------|-------------|
 | `HIGGSFIELD_CLERK_COOKIE` | *(required)* | The `__client` cookie from your browser. |
 | `HIGGSFIELD_SESSION_ID` | *(required)* | `window.Clerk.session.id`. |
+| `HIGGSFIELD_EXTRA_COOKIES` | *(often required)* | Extra browser cookies forwarded to the API, e.g. `datadome=...`. The `/jobs` create endpoint sits behind DataDome; without your browser's `datadome` cookie, `POST /jobs/{model}` returns a `403` captcha challenge. Get it from DevTools → Console: `document.cookie`. This cookie rotates, so refresh it when generation starts 403-ing. |
 | `HIGGSFIELD_MAX_CONCURRENT` | `4` | Max parallel jobs (match your plan tier: 4/8/12/16). |
 | `HIGGSFIELD_DEFAULT_MODEL` | `nano-banana-2` | Image model used when not specified. |
 | `HIGGSFIELD_DEFAULT_RESOLUTION` | `2k` | One of `1k`, `2k`, `4k`. |
@@ -255,8 +256,20 @@ Authorization: Bearer <jwt>
 { "params": { "...": "...", "use_unlim": true }, "use_unlim": true }
 ```
 
+**Unlimited is granted (or denied) by Higgsfield's server, per model + account.**
+Sending `use_unlim: true` is exactly what the official web app sends — the server then
+decides. If a model isn't covered by your plan it returns
+`403 {"error_type": "unlimited_generation_not_allowed"}`, and this MCP surfaces that as-is;
+it does not (and cannot) override the decision. Check your entitlement with `account_info`
+(`has_unlim` / `has_flex_unlim`). In practice unlimited is model-specific — some models
+accept the flag on lower tiers, others require a true unlimited plan.
+
+The `/jobs` create endpoint is also behind DataDome bot protection. This client forwards
+your browser's own `datadome` cookie (via `HIGGSFIELD_EXTRA_COOKIES`) so your existing
+session is recognised; it does not solve or bypass challenges.
+
 See [`docs/EXTENDING.md`](docs/EXTENDING.md) for how to add new endpoints, and
-[`docs/MODEL_SCHEMAS.md`](docs/MODEL_SCHEMAS.md) for per-model required-field reference.
+[`docs/MODEL_SCHEMAS.md`](docs/MODEL_SCHEMAS.md) for the verified per-model request contract.
 
 > **Video model note:** Each video model has different required fields. When
 > `generate_video` returns a 422 error, the message tells you exactly which fields to add

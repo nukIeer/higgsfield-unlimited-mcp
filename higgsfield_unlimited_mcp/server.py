@@ -91,9 +91,7 @@ async def auth_status() -> str:
 async def account_info() -> str:
     """Plan info, all credit balances, and the has_unlim flag."""
     try:
-        res = await _svc().try_get(
-            ["/account", "/account/info", "/me", "/user", "/users/me"]
-        )
+        res = await _svc().try_get(["/user", "/account", "/me"])
         return _jdump(res)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -104,7 +102,7 @@ async def concurrent_state() -> str:
     """Concurrent-slot tier (how many jobs can run at once: 4/8/12/16)."""
     try:
         res = await _svc().try_get(
-            ["/account/concurrency", "/concurrency", "/account/concurrent", "/jobs/concurrency"]
+            ["/concurrent-boost-credits/state", "/concurrent-boost-credits/products"]
         )
         return _jdump(res)
     except Exception as exc:  # noqa: BLE001
@@ -359,7 +357,7 @@ async def generate_video(
         urls = await _svc().resolve_inputs(input_files, input_images)
         if urls:
             params["input_images"] = urls
-            params.setdefault("image_url", urls[0])
+            params.setdefault("image_url", urls[0].get("url"))
         if extra_params:
             params.update(extra_params)
         rec = await _svc().submit(model=model, params=params, kind="video", prompt=prompt)
@@ -531,7 +529,7 @@ async def workspace_details() -> str:
     """Active workspace info (id, name, type, role)."""
     try:
         return _jdump(
-            await _svc().try_get(["/workspaces/active", "/workspaces/current", "/workspace"])
+            await _svc().try_get(["/workspaces/details", "/workspaces/active", "/workspace"])
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -541,9 +539,7 @@ async def workspace_details() -> str:
 async def workspace_wallet() -> str:
     """Workspace credit balance."""
     try:
-        return _jdump(
-            await _svc().try_get(["/workspaces/wallet", "/wallet", "/workspaces/active/wallet"])
-        )
+        return _jdump(await _svc().try_get(["/workspaces/wallet", "/wallet"]))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

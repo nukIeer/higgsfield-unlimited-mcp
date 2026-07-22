@@ -49,16 +49,32 @@ class Service:
     # Input resolution: upload local files, return usable URLs
     # ------------------------------------------------------------------ #
     async def resolve_inputs(
-        self, input_files: list[str] | None, input_images: list[str] | None
-    ) -> list[str]:
-        urls: list[str] = list(input_images or [])
+        self, input_files: list[str] | None, input_images: list | None
+    ) -> list[dict[str, Any]]:
+        """Return input media as Higgsfield media-objects.
+
+        Higgsfield expects ``input_images`` as a list of
+        ``{"id": ..., "type": "media_input", "url": ...}`` objects (see the HAR
+        capture / docs/MODEL_SCHEMAS.md). Accepts raw URL strings or already-formed
+        objects in ``input_images`` and uploads any local ``input_files``.
+        """
+        media: list[dict[str, Any]] = []
+        for item in input_images or []:
+            if isinstance(item, dict):
+                item.setdefault("type", "media_input")
+                media.append(item)
+            elif isinstance(item, str):
+                media.append({"type": "media_input", "url": item})
         for f in input_files or []:
             uploaded = await self.client.upload_file(f)
             url = uploaded.get("url")
             if not url:
                 raise HiggsfieldError(f"Upload of {f} did not return a URL: {uploaded}")
-            urls.append(url)
-        return urls
+            obj = {"type": "media_input", "url": url}
+            if uploaded.get("id"):
+                obj["id"] = uploaded["id"]
+            media.append(obj)
+        return media
 
     # ------------------------------------------------------------------ #
     # Core: submit + track

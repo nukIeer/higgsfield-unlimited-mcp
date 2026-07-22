@@ -6,6 +6,58 @@ Every generation is `POST /jobs/{model}` with:
 { "params": { "...": "...", "use_unlim": true }, "use_unlim": true }
 ```
 
+## Verified request/response contract
+
+`{model}` in the path is the **dash form** of the model id (`nano-banana-2`,
+`z-image`, `seedream-v4-5`), even though the catalog lists ids in underscore form
+(`nano_banana_2`). The underscore form on the path returns `405 Method Not Allowed`.
+
+**`input_images` must be a list of media objects, each with an `id`:**
+
+```json
+"input_images": [
+  { "id": "b6af2228-...", "type": "media_input", "url": "https://.../file.jpg" }
+]
+```
+
+A bare URL string (no `id`) is rejected with `422 input_images.0.id Field required`.
+So an input image must first be uploaded (via `media_upload` / `input_files`) to obtain
+an `id`. The server ignores the `width`/`height` you send and recomputes them.
+
+**The create response nests the pollable job id** — the top-level `id` is the
+*project* id, not pollable:
+
+```json
+{ "id": "<project_id>",
+  "job_sets": [ { "type": "nano_banana_2",
+    "jobs": [ { "id": "<POLL THIS>", "status": "waiting" } ] } ] }
+```
+
+Poll with `GET /jobs/{job_id}` (or `POST /jobs/status-batch`). Results arrive under
+`results.raw` / `results.min` as `{type, url}`; **exclude `type: "media_input"`** —
+those are your input images echoed back, not outputs.
+
+## `use_unlim` is enforced server-side, per model + account
+
+Setting `use_unlim: true` does **not** guarantee unlimited generation. The server
+checks entitlement and may return `403 {"error_type": "unlimited_generation_not_allowed"}`.
+Observed: `nano-banana-2` accepts it on a `plus` account (has a free/promo allowance);
+`z-image` rejects it. Whether a model is unlimited-eligible depends on your plan
+(`has_unlim` / `has_flex_unlim` in `GET /user`) and Higgsfield's per-model rules. When
+denied, either the model isn't covered or your account isn't entitled — this MCP does
+not and cannot override that decision.
+
+## Real account / workspace endpoints (from traffic capture)
+
+| Tool | Path |
+|------|------|
+| `account_info` | `GET /user` (has `plan_type`, `has_unlim`, all `*_credits`) |
+| `concurrent_state` | `GET /concurrent-boost-credits/state` |
+| `workspace_details` | `GET /workspaces/details` |
+| `workspace_wallet` | `GET /workspaces/wallet` |
+| free generations | `GET /user/free-gens/v2` |
+| history | `GET /jobs/accessible` |
+
 The **common** fields the server always sends for image jobs are `prompt`, `width`,
 `height`, `aspect_ratio`, `resolution`, `batch_size`. Video jobs send `prompt`,
 `aspect_ratio`, and (when provided) `duration`, `resolution`/`quality`, `image_url`,

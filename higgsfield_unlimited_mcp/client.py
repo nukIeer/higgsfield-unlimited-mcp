@@ -48,10 +48,22 @@ def _first(d: dict[str, Any], keys: tuple[str, ...]) -> Any:
 
 
 def extract_job_id(payload: Any) -> str | None:
-    """Best-effort extraction of a job id from a submit/poll response."""
+    """Best-effort extraction of a *pollable* job id from a submit/poll response.
+
+    Higgsfield's create response nests the real job id under
+    ``job_sets[].jobs[].id`` — the top-level ``id`` is the project id and is NOT
+    pollable via ``GET /jobs/{id}``. Prefer the nested job id.
+    """
     if isinstance(payload, str):
         return payload
     if isinstance(payload, dict):
+        job_sets = payload.get("job_sets")
+        if isinstance(job_sets, list) and job_sets:
+            jobs = job_sets[0].get("jobs") if isinstance(job_sets[0], dict) else None
+            if isinstance(jobs, list) and jobs and isinstance(jobs[0], dict):
+                jid = _first(jobs[0], _ID_KEYS)
+                if jid:
+                    return str(jid)
         jid = _first(payload, _ID_KEYS)
         if jid:
             return str(jid)
@@ -99,10 +111,15 @@ def extract_result_urls(payload: Any) -> list[dict[str, Any]]:
 
     def _scan(node: Any) -> None:
         if isinstance(node, dict):
+            # Skip source/input media — those are not generation outputs.
+            if node.get("type") == "media_input":
+                return
             url = _first(node, _URL_KEYS)
             if url and isinstance(url, str) and url.startswith("http"):
                 results.append({"url": url, "type": node.get("type") or node.get("kind")})
-            for v in node.values():
+            for k, v in node.items():
+                if k in ("input_images", "input_image", "medias", "reference_elements"):
+                    continue  # these carry input media, not results
                 _scan(v)
         elif isinstance(node, list):
             for item in node:
