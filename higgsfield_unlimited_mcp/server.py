@@ -416,6 +416,82 @@ def _is_unlim_denied(exc: HiggsfieldError) -> bool:
     return False
 
 
+async def _video_core(
+    prompt: str,
+    model: str,
+    aspect_ratio: str,
+    duration: int,
+    resolution: str,
+    resolution_fallback: bool,
+    input_files: list[str] | None,
+    input_images: list | None,
+    media_role: str,
+    generate_audio: bool,
+    mode: str | None,
+    seed: int | None,
+    account: str | int | None,
+    extra_params: dict[str, Any] | None,
+    wait: bool,
+    download: bool,
+    timeout: float,
+) -> dict[str, Any]:
+    """One video job with resolution fallback + pool routing. Returns a result dict."""
+    try:
+        chain = _resolution_chain(resolution) if resolution_fallback else [resolution]
+        res_attempts: list[dict[str, Any]] = []
+
+        for res in chain:
+            try:
+                vw, vh = dims.video_dimensions(aspect_ratio, res)
+            except ValueError:
+                vw, vh = dims.video_dimensions("9:16", res)
+
+            async def _submit(svc: Service, _res=res, _vw=vw, _vh=vh):
+                media_objs = await svc.resolve_inputs(input_files, input_images)
+                params: dict[str, Any] = {
+                    "prompt": prompt, "aspect_ratio": aspect_ratio, "batch_size": 1,
+                    "duration": duration, "resolution": _res, "generate_audio": generate_audio,
+                    "width": _vw, "height": _vh,
+                }
+                if mode:
+                    params["mode"] = mode
+                if seed is not None:
+                    params["seed"] = seed
+                if media_objs:
+                    params["medias"] = svc.to_v2_medias(media_objs, role=media_role)
+                if extra_params:
+                    params.update(extra_params)
+                return await svc.submit_v2(model=model, params=params, kind="video", prompt=prompt)
+
+            try:
+                result = await _pool().run_job(
+                    _submit, wait=wait, download=download, timeout=timeout, account=account
+                )
+            except HiggsfieldError as exc:
+                res_attempts.append({"resolution": res, "status": exc.status,
+                                     "denied_unlim": _is_unlim_denied(exc)})
+                if _is_unlim_denied(exc) or exc.status in (400, 422):
+                    continue
+                return {"error": str(exc), "status": exc.status, "body": exc.body,
+                        "prompt": prompt[:60]}
+
+            if result.get("error") and "rate-limited" in str(result.get("error", "")):
+                result["resolution_tried"] = res
+                if res_attempts:
+                    result["resolution_attempts"] = res_attempts
+                return result
+
+            result["resolution_used"] = res
+            if res_attempts:
+                result["resolution_attempts"] = res_attempts
+            return result
+
+        return {"error": "Every resolution was denied for unlimited.", "model": model,
+                "prompt": prompt[:60], "resolution_attempts": res_attempts}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}", "prompt": prompt[:60]}
+
+
 @mcp.tool()
 async def generate_video(
     prompt: str,
@@ -436,82 +512,64 @@ async def generate_video(
     download: bool = True,
     timeout: float = 900.0,
 ) -> str:
-    """Generate a video via the v2 API, with automatic resolution fallback.
+    """Generate ONE video via the v2 API, with automatic resolution fallback.
 
-    Defaults target viral 9:16 clips. Because unlimited access is capped per model
-    (e.g. Seedance/Wan/Gemini unlimited render at 720p), ``resolution_fallback`` walks
-    the requested resolution down the ladder (1080p -> 720p -> 480p) whenever the server
-    returns ``unlimited_generation_not_allowed`` or rejects the resolution — so you get
-    the highest resolution your unlimited plan actually allows.
+    Defaults target viral 9:16 clips. Unlimited is capped per model (Seedance/Wan/Gemini
+    render unlimited at 720p), so ``resolution_fallback`` walks 1080p -> 720p -> 480p when
+    the server denies unlimited. To make MANY videos in parallel across your accounts, use
+    ``generate_video_batch`` (one generate_video call = one account = sequential).
 
-    Unlimited-eligible video models on a typical plan: ``seedance_2_0``,
-    ``seedance_2_0_mini``, ``wan2_7``, ``gemini_omni``, ``kling3_0``. Local
-    ``input_files`` are uploaded and attached as ``medias`` (role ``start_image`` for
-    image-to-video). Use ``extra_params`` for model-specific fields.
+    Unlimited-eligible: ``seedance_2_0``, ``seedance_2_0_mini``, ``wan2_7``, ``gemini_omni``,
+    ``kling3_0``. Local ``input_files`` are uploaded as the ``start_image`` (image-to-video).
+    """
+    result = await _video_core(
+        prompt, model, aspect_ratio, duration, resolution, resolution_fallback,
+        input_files, input_images, media_role, generate_audio, mode, seed, account,
+        extra_params, wait, download, timeout,
+    )
+    return _jdump(result)
+
+
+@mcp.tool()
+async def generate_video_batch(
+    prompts: list[str],
+    model: str = "seedance_2_0",
+    aspect_ratio: str = "9:16",
+    duration: int = 5,
+    resolution: str = "1080p",
+    resolution_fallback: bool = True,
+    input_files_per_prompt: list[list[str]] | None = None,
+    media_role: str = "start_image",
+    generate_audio: bool = True,
+    mode: str | None = "std",
+    extra_params: dict[str, Any] | None = None,
+    wait: bool = True,
+    download: bool = True,
+    timeout: float = 900.0,
+) -> str:
+    """Generate MANY videos in PARALLEL, spread across all accounts in the pool.
+
+    This is how you use multiple accounts at once: N prompts fan out concurrently and the
+    pool routes each to the least-busy account (with 429 failover). With ``wait=True``
+    (default) it returns when all are done; ``wait=False`` fires them and returns job ids
+    to poll with ``queue_status``. For image-to-video per prompt, pass
+    ``input_files_per_prompt=[["a.jpg"], ["b.jpg"], ...]`` aligned to ``prompts``.
     """
     try:
-        chain = _resolution_chain(resolution) if resolution_fallback else [resolution]
-        res_attempts: list[dict[str, Any]] = []
+        async def _one(i: int, p: str) -> dict[str, Any]:
+            files = None
+            if input_files_per_prompt and i < len(input_files_per_prompt):
+                files = input_files_per_prompt[i]
+            return await _video_core(
+                p, model, aspect_ratio, duration, resolution, resolution_fallback,
+                files, None, media_role, generate_audio, mode, None, None,
+                extra_params, wait, download, timeout,
+            )
 
-        for res in chain:
-            try:
-                vw, vh = dims.video_dimensions(aspect_ratio, res)
-            except ValueError:
-                vw, vh = dims.video_dimensions("9:16", res)
-
-            async def _submit(svc: Service, _res=res, _vw=vw, _vh=vh):
-                media_objs = await svc.resolve_inputs(input_files, input_images)
-                params: dict[str, Any] = {
-                    "prompt": prompt,
-                    "aspect_ratio": aspect_ratio,
-                    "batch_size": 1,
-                    "duration": duration,
-                    "resolution": _res,
-                    "generate_audio": generate_audio,
-                    "width": _vw,
-                    "height": _vh,
-                }
-                if mode:
-                    params["mode"] = mode
-                if seed is not None:
-                    params["seed"] = seed
-                if media_objs:
-                    params["medias"] = svc.to_v2_medias(media_objs, role=media_role)
-                if extra_params:
-                    params.update(extra_params)
-                return await svc.submit_v2(model=model, params=params, kind="video", prompt=prompt)
-
-            try:
-                result = await _pool().run_job(
-                    _submit, wait=wait, download=download, timeout=timeout, account=account
-                )
-            except HiggsfieldError as exc:
-                res_attempts.append({"resolution": res, "status": exc.status,
-                                     "denied_unlim": _is_unlim_denied(exc)})
-                # Unlimited denied at this resolution -> step down. Other hard errors stop.
-                if _is_unlim_denied(exc) or exc.status in (400, 422):
-                    continue
-                return _err(exc)
-
-            # run_job returned: either a job summary, or an all-accounts-rate-limited dict.
-            if result.get("error") and "rate-limited" in str(result.get("error", "")):
-                # Lower resolution won't fix a rate limit; surface it (add more accounts).
-                result["resolution_tried"] = res
-                if res_attempts:
-                    result["resolution_attempts"] = res_attempts
-                return _jdump(result)
-
-            result["resolution_used"] = res
-            if res_attempts:
-                result["resolution_attempts"] = res_attempts
-            return _jdump(result)
-
-        return _jdump({
-            "error": "Every resolution in the fallback chain was denied for unlimited.",
-            "model": model,
-            "resolution_attempts": res_attempts,
-            "hint": "This model may not be unlimited-eligible on your plan. Check account_info.",
-        })
+        results = await asyncio.gather(*[_one(i, p) for i, p in enumerate(prompts)])
+        ok = sum(1 for r in results if not r.get("error"))
+        return _jdump({"submitted": len(results), "succeeded": ok,
+                       "accounts": len(_pool().services), "jobs": results})
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

@@ -12,6 +12,7 @@ picks the least-busy account not currently cooling down.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import time
@@ -56,6 +57,10 @@ class Pool:
             self.services.append(Service(cfg))
             self.labels.append(acc.label)
         self._cooldown_until: list[float] = [0.0] * len(self.services)
+        # Jobs picked-but-not-yet-submitted per account, so simultaneous fan-out
+        # (a batch) spreads across accounts instead of piling on account-1.
+        self._pending: list[int] = [0] * len(self.services)
+        self._pick_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
         for svc in self.services:
@@ -66,33 +71,32 @@ class Pool:
         return self.services[0]
 
     def _load(self, idx: int) -> int:
-        return self.services[idx].registry.snapshot()["active_count"]
-
-    def _order(self) -> list[int]:
-        """Account indices, least-busy first, cooling-down accounts last."""
-        now = time.monotonic()
-        ready = [i for i in range(len(self.services)) if self._cooldown_until[i] <= now]
-        cooling = [i for i in range(len(self.services)) if self._cooldown_until[i] > now]
-        ready.sort(key=self._load)
-        cooling.sort(key=lambda i: self._cooldown_until[i])
-        return ready + cooling
+        # In-flight jobs (running) + picked-but-not-yet-submitted.
+        return self.services[idx].registry.snapshot()["active_count"] + self._pending[idx]
 
     def _cooldown(self, idx: int) -> None:
         self._cooldown_until[idx] = time.monotonic() + _COOLDOWN_SECONDS
 
     # ------------------------------------------------------------------ #
-    def _resolve_account(self, account: str | int | None) -> list[int]:
-        """Turn an account selector into candidate indices (ordered)."""
+    def _allowed_indices(self, account: str | int | None) -> list[int] | None:
+        """Which account indices this job may use (None = any)."""
         if account is None:
-            return self._order()
+            return list(range(len(self.services)))
         if isinstance(account, int):
-            if 0 <= account < len(self.services):
-                return [account]
-        else:
-            for i, label in enumerate(self.labels):
-                if label == account or account in label:
-                    return [i]
-        return []
+            return [account] if 0 <= account < len(self.services) else []
+        return [i for i, label in enumerate(self.labels) if label == account or account in label]
+
+    async def _pick(self, allowed: list[int], exclude: set[int]) -> int | None:
+        """Atomically choose the least-loaded, non-cooling account and reserve it."""
+        async with self._pick_lock:
+            now = time.monotonic()
+            ready = [i for i in allowed if i not in exclude and self._cooldown_until[i] <= now]
+            pool = ready or [i for i in allowed if i not in exclude]  # all cooling? still try
+            if not pool:
+                return None
+            idx = min(pool, key=lambda i: (self._load(i), self._cooldown_until[i]))
+            self._pending[idx] += 1
+            return idx
 
     async def run_job(
         self,
@@ -114,12 +118,16 @@ class Pool:
         attempts: list[dict[str, Any]] = []
         last_exc: HiggsfieldError | None = None
 
-        candidates = self._resolve_account(account)
-        if not candidates:
+        allowed = self._allowed_indices(account)
+        if not allowed:
             return {"error": f"Unknown account selector: {account!r}",
                     "available": self.labels}
 
-        for idx in candidates:
+        exclude: set[int] = set()
+        while True:
+            idx = await self._pick(allowed, exclude)
+            if idx is None:
+                break  # every allowed account tried / rate-limited
             svc = self.services[idx]
             label = self.labels[idx]
             try:
@@ -130,8 +138,11 @@ class Pool:
                 attempts.append({"account": label, "status": exc.status, "rate_limited": rate})
                 if rate:
                     self._cooldown(idx)
+                    exclude.add(idx)
                     continue  # try the next account
                 raise  # a non-rate-limit error won't be fixed by another account
+            finally:
+                self._pending[idx] -= 1  # picked -> submitted (or failed); registry covers it now
 
             summary = self._summary(rec, label)
             if wait and not rec.is_terminal:
