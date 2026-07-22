@@ -1,13 +1,11 @@
 """Model registry for Higgsfield Unlimited MCP.
 
-Each entry maps a model id (the ``{model}`` path segment in
-``POST /jobs/{model}``) to metadata: its category and, where known, the extra
-fields that model requires beyond the common ones.
-
-Model ids evolve on Higgsfield's side. Treat this as a convenient default list —
-you can always call ``generate_raw`` with any model id and a custom params dict,
-and the API's 422 error will tell you exactly which fields a model needs. See
-``docs/MODEL_SCHEMAS.md``.
+``id`` is the API path form used for ``POST /jobs/{id}`` (v1) or
+``POST /jobs/v2/{id}`` (v2). v1 ids use dashes (``nano-banana-2``); v2 ids use
+underscores (``seedream_v5_pro``). ``unlimited=True`` marks models that a typical
+Plus + 1-day-unlimited plan can run with ``use_unlim: true`` — the server is the
+final authority (see ``account_info``). Model ids and entitlements change on
+Higgsfield's side; ``generate_raw`` works with any id + ``api_version``.
 """
 
 from __future__ import annotations
@@ -23,98 +21,88 @@ CATEGORY_AUDIO = "audio"
 class ModelSpec:
     id: str
     category: str
-    # Human note on what the model is / needs.
+    api_version: str = "v2"
+    unlimited: bool = False
     note: str = ""
-    # Fields the model needs in addition to the common ones (prompt, dims, ...).
-    required_extra: tuple[str, ...] = field(default_factory=tuple)
-    # Whether this model consumes an input image/video (i2i, i2v, edit, ...).
+    # Resolution options the model supports (empty = model has no resolution knob).
+    resolutions: tuple[str, ...] = field(default_factory=tuple)
+    # For unlimited: the highest resolution unlimited actually grants (else None).
+    unlimited_max: str | None = None
     needs_input: bool = False
 
 
 # --------------------------------------------------------------------------- #
-# Image models (text-to-image + image editing)
+# Image models
 # --------------------------------------------------------------------------- #
 _IMAGE_MODELS = [
-    ModelSpec("nano-banana-2", CATEGORY_IMAGE, "Google Nano Banana 2 (default)."),
-    ModelSpec("nano-banana", CATEGORY_IMAGE, "Google Nano Banana."),
-    ModelSpec("nano-banana-2-shots", CATEGORY_IMAGE, "Multi-shot storyboard endpoint.",
-              required_extra=("shots",)),
-    ModelSpec("flux-2", CATEGORY_IMAGE, "Black Forest Labs FLUX.2."),
-    ModelSpec("flux-1-1-pro", CATEGORY_IMAGE, "FLUX 1.1 Pro."),
-    ModelSpec("flux-kontext", CATEGORY_IMAGE, "FLUX Kontext (image editing).", needs_input=True),
-    ModelSpec("seedream-v4-5", CATEGORY_IMAGE, "ByteDance Seedream v4.5."),
-    ModelSpec("seedream-v4", CATEGORY_IMAGE, "ByteDance Seedream v4."),
-    ModelSpec("openai-hazel", CATEGORY_IMAGE, "OpenAI image model (Hazel)."),
-    ModelSpec("gpt-image", CATEGORY_IMAGE, "OpenAI GPT image."),
-    ModelSpec("reve", CATEGORY_IMAGE, "Reve image model."),
-    ModelSpec("z-image", CATEGORY_IMAGE, "Z-Image."),
-    ModelSpec("recraft-v3", CATEGORY_IMAGE, "Recraft V3."),
-    ModelSpec("ideogram-v3", CATEGORY_IMAGE, "Ideogram v3."),
-    ModelSpec("imagen-4", CATEGORY_IMAGE, "Google Imagen 4."),
-    ModelSpec("qwen-image", CATEGORY_IMAGE, "Qwen Image."),
-    ModelSpec("hunyuan-image", CATEGORY_IMAGE, "Tencent Hunyuan Image."),
-    ModelSpec("higgsfield-soul", CATEGORY_IMAGE, "Higgsfield Soul (photoreal)."),
-    ModelSpec("higgsfield-soul-id", CATEGORY_IMAGE, "Higgsfield Soul with character id.",
+    ModelSpec("nano-banana-2", CATEGORY_IMAGE, "v1", True, "Google Nano Banana 2.",
+              ("1k", "2k", "4k"), "2k"),
+    ModelSpec("nano-banana-pro", CATEGORY_IMAGE, "v1", True, "Google Nano Banana Pro.",
+              ("1k", "2k", "4k"), "2k"),
+    ModelSpec("nano-banana", CATEGORY_IMAGE, "v1", True, "Google Nano Banana."),
+    ModelSpec("gpt_image_2", CATEGORY_IMAGE, "v2", True, "OpenAI GPT Image 2.",
+              ("1k", "2k", "4k"), "2k"),
+    ModelSpec("gpt_image", CATEGORY_IMAGE, "v2", True, "OpenAI GPT Image."),
+    ModelSpec("seedream_v5_pro", CATEGORY_IMAGE, "v2", True, "ByteDance Seedream 5.0 Pro.",
+              ("1k", "1.5k", "2k"), "2k"),
+    ModelSpec("seedream_v5_lite", CATEGORY_IMAGE, "v2", True, "ByteDance Seedream 5.0 Lite."),
+    ModelSpec("seedream_v4_5", CATEGORY_IMAGE, "v2", True, "ByteDance Seedream 4.5."),
+    ModelSpec("soul_2", CATEGORY_IMAGE, "v2", True, "Higgsfield Soul 2.0 (realistic/UGC)."),
+    ModelSpec("flux_2", CATEGORY_IMAGE, "v2", True, "Black Forest Labs FLUX.2 Pro.",
+              ("1k", "2k"), "2k"),
+    ModelSpec("kling_omni_image", CATEGORY_IMAGE, "v2", True, "Kling O1 Image.", ("1k", "2k"), "2k"),
+    # Available but not part of the sample unlimited set:
+    ModelSpec("openai_hazel", CATEGORY_IMAGE, "v2", False, "OpenAI Hazel (best text)."),
+    ModelSpec("z_image", CATEGORY_IMAGE, "v2", False, "Z-Image (fast, not unlimited-eligible)."),
+    ModelSpec("recraft_v4_1", CATEGORY_IMAGE, "v2", False, "Recraft V4.1 (logos/vector)."),
+    ModelSpec("grok_image", CATEGORY_IMAGE, "v2", False, "xAI Grok Image."),
+    ModelSpec("hunyuan_image", CATEGORY_IMAGE, "v2", False, "Tencent Hunyuan Image."),
+    ModelSpec("outpaint", CATEGORY_IMAGE, "v2", False, "Outpaint / extend.", needs_input=True),
+    ModelSpec("image_background_remover", CATEGORY_IMAGE, "v2", False, "Background removal.",
               needs_input=True),
-    ModelSpec("face-swap", CATEGORY_IMAGE, "Face swap.", needs_input=True),
-    ModelSpec("character-swap", CATEGORY_IMAGE, "Character swap.", needs_input=True),
-    ModelSpec("upscale", CATEGORY_IMAGE, "Image upscaler.", needs_input=True),
-    ModelSpec("inpaint", CATEGORY_IMAGE, "Inpainting / edit region.", needs_input=True),
-    ModelSpec("outpaint", CATEGORY_IMAGE, "Outpainting / extend canvas.", needs_input=True),
-    ModelSpec("remove-background", CATEGORY_IMAGE, "Background removal.", needs_input=True),
-    ModelSpec("relight", CATEGORY_IMAGE, "Relighting.", needs_input=True),
-    ModelSpec("style-transfer", CATEGORY_IMAGE, "Style transfer.", needs_input=True),
-    ModelSpec("product-placement", CATEGORY_IMAGE, "Product placement.", needs_input=True),
-    ModelSpec("sketch-to-image", CATEGORY_IMAGE, "Sketch to image.", needs_input=True),
-    ModelSpec("hunyuan-3d", CATEGORY_IMAGE, "Image to 3D preview.", needs_input=True),
-    ModelSpec("seededit", CATEGORY_IMAGE, "Seedream edit.", needs_input=True),
-    ModelSpec("photo-restore", CATEGORY_IMAGE, "Photo restoration.", needs_input=True),
+    ModelSpec("bytedance_image_upscale", CATEGORY_IMAGE, "v2", False, "Image upscale.",
+              ("2k", "4k"), needs_input=True),
 ]
 
 # --------------------------------------------------------------------------- #
-# Video models (text-to-video + image-to-video)
+# Video models (v2). Unlimited caps are 720p for Seedance/Wan/Gemini.
 # --------------------------------------------------------------------------- #
 _VIDEO_MODELS = [
-    ModelSpec("seedance", CATEGORY_VIDEO, "ByteDance Seedance."),
-    ModelSpec("seedance-pro", CATEGORY_VIDEO, "Seedance Pro."),
-    ModelSpec("kling", CATEGORY_VIDEO, "Kuaishou Kling."),
-    ModelSpec("kling2-6", CATEGORY_VIDEO, "Kling 2.6."),
-    ModelSpec("kling2-5", CATEGORY_VIDEO, "Kling 2.5."),
-    ModelSpec("kling2-1", CATEGORY_VIDEO, "Kling 2.1."),
-    ModelSpec("sora2-video", CATEGORY_VIDEO, "OpenAI Sora 2."),
-    ModelSpec("sora2-pro", CATEGORY_VIDEO, "OpenAI Sora 2 Pro."),
-    ModelSpec("veo3", CATEGORY_VIDEO, "Google Veo 3.", required_extra=("duration",)),
-    ModelSpec("veo3-1", CATEGORY_VIDEO, "Google Veo 3.1.", required_extra=("duration",)),
-    ModelSpec("veo3-fast", CATEGORY_VIDEO, "Google Veo 3 Fast."),
-    ModelSpec("minimax-hailuo", CATEGORY_VIDEO, "MiniMax Hailuo."),
-    ModelSpec("minimax-hailuo-02", CATEGORY_VIDEO, "MiniMax Hailuo 02."),
-    ModelSpec("wan2-2-video", CATEGORY_VIDEO, "Alibaba WAN 2.2."),
-    ModelSpec("wan2-5-video", CATEGORY_VIDEO, "Alibaba WAN 2.5."),
-    ModelSpec("wan2-6", CATEGORY_VIDEO, "Alibaba WAN 2.6."),
-    ModelSpec("image2video", CATEGORY_VIDEO, "Generic image-to-video.", needs_input=True),
-    ModelSpec("infinite-talk", CATEGORY_VIDEO, "Talking-avatar / lip-sync.", needs_input=True,
-              required_extra=("audio_url",)),
-    ModelSpec("higgsfield-dop", CATEGORY_VIDEO, "Higgsfield DoP (motion presets)."),
-    ModelSpec("higgsfield-dop-turbo", CATEGORY_VIDEO, "Higgsfield DoP Turbo."),
-    ModelSpec("runway-gen4", CATEGORY_VIDEO, "Runway Gen-4."),
-    ModelSpec("luma-ray", CATEGORY_VIDEO, "Luma Dream Machine (Ray)."),
-    ModelSpec("luma-ray2", CATEGORY_VIDEO, "Luma Ray 2."),
-    ModelSpec("pika", CATEGORY_VIDEO, "Pika."),
-    ModelSpec("pixverse", CATEGORY_VIDEO, "PixVerse."),
-    ModelSpec("hunyuan-video", CATEGORY_VIDEO, "Tencent Hunyuan Video."),
-    ModelSpec("ltx-video", CATEGORY_VIDEO, "Lightricks LTX Video."),
-    ModelSpec("wan-animate", CATEGORY_VIDEO, "WAN animate (image drive).", needs_input=True),
-    ModelSpec("act-two", CATEGORY_VIDEO, "Runway Act-Two performance capture.", needs_input=True),
-    ModelSpec("video-upscale", CATEGORY_VIDEO, "Video upscaler.", needs_input=True),
-    ModelSpec("lipsync", CATEGORY_VIDEO, "Lip-sync.", needs_input=True,
-              required_extra=("audio_url",)),
+    ModelSpec("seedance_2_0", CATEGORY_VIDEO, "v2", True, "Seedance 2.0 (ref-driven, audio).",
+              ("480p", "720p", "1080p", "4k"), "720p"),
+    ModelSpec("seedance_2_0_mini", CATEGORY_VIDEO, "v2", True, "Seedance 2.0 Mini (fast).",
+              ("480p", "720p"), "720p"),
+    ModelSpec("wan2_7", CATEGORY_VIDEO, "v2", True, "Wan 2.7 (synced audio, character).",
+              ("720p", "1080p"), "720p"),
+    ModelSpec("gemini_omni", CATEGORY_VIDEO, "v2", True, "Gemini Omni Flash (native audio).",
+              ("720p",), "720p"),
+    ModelSpec("kling3_0", CATEGORY_VIDEO, "v2", True, "Kling v3.0 (multi-shot, audio sync)."),
+    # Available but not part of the sample unlimited set:
+    ModelSpec("kling3_0_turbo", CATEGORY_VIDEO, "v2", False, "Kling 3.0 Turbo (fast).",
+              ("720p", "1080p")),
+    ModelSpec("kling2_6", CATEGORY_VIDEO, "v2", False, "Kling 2.6."),
+    ModelSpec("seedance1_5", CATEGORY_VIDEO, "v2", False, "Seedance 1.5 Pro.",
+              ("480p", "720p", "1080p")),
+    ModelSpec("minimax_hailuo", CATEGORY_VIDEO, "v2", False, "Minimax Hailuo.",
+              ("512", "768", "1080")),
+    ModelSpec("wan2_6", CATEGORY_VIDEO, "v2", False, "Wan 2.6 (stylized).", ("720p", "1080p")),
+    ModelSpec("veo3", CATEGORY_VIDEO, "v2", False, "Google Veo 3.", needs_input=True),
+    ModelSpec("veo3_1", CATEGORY_VIDEO, "v2", False, "Google Veo 3.1.", needs_input=True),
+    ModelSpec("grok_video", CATEGORY_VIDEO, "v2", False, "xAI Grok Video."),
+    ModelSpec("cinematic_studio_3_0", CATEGORY_VIDEO, "v2", False, "Cinema Studio Video 3.0.",
+              ("480p", "720p", "1080p", "4k")),
+    ModelSpec("video_upscale", CATEGORY_VIDEO, "v2", False, "Video upscale.", needs_input=True),
 ]
 
 # --------------------------------------------------------------------------- #
-# Audio models
+# Audio models (unlimited on the sample plan). Exact ids may vary; verify with a
+# capture or generate_raw.
 # --------------------------------------------------------------------------- #
 _AUDIO_MODELS = [
-    ModelSpec("text2speech", CATEGORY_AUDIO, "Text-to-speech.", required_extra=("text",)),
+    ModelSpec("text2speech", CATEGORY_AUDIO, "v2", True, "Text to Speech V2."),
+    ModelSpec("mirelo_text2audio", CATEGORY_AUDIO, "v2", True, "Mirelo Text to Audio."),
+    ModelSpec("inworld_tts", CATEGORY_AUDIO, "v2", True, "Inworld Text to Speech."),
+    ModelSpec("seed_audio", CATEGORY_AUDIO, "v2", True, "Seed Audio 1.0."),
 ]
 
 
@@ -132,6 +120,10 @@ def models_by_category(category: str | None) -> list[ModelSpec]:
         return all_models()
     category = category.lower()
     return [m for m in REGISTRY.values() if m.category == category]
+
+
+def unlimited_models(category: str | None = None) -> list[ModelSpec]:
+    return [m for m in models_by_category(category) if m.unlimited]
 
 
 def get_model(model_id: str) -> ModelSpec | None:

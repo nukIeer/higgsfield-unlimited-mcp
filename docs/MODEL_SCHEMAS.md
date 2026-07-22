@@ -37,6 +37,30 @@ Poll with `GET /jobs/{job_id}` (or `POST /jobs/status-batch`). Results arrive un
 `results.raw` / `results.min` as `{type, url}`; **exclude `type: "media_input"`** —
 those are your input images echoed back, not outputs.
 
+## Two API generations: v1 and v2
+
+There are two create endpoints:
+
+- **v1** — `POST /jobs/{dash-id}` (e.g. `nano-banana-2`). Input media go under
+  `input_images: [{id, type: "media_input", url}]`.
+- **v2** — `POST /jobs/v2/{underscore_id}` (e.g. `seedream_v5_lite`, and most video
+  models). `params` carries a `model` field, and input media go under
+  `medias: [{"role": "start_image"|"image"|..., "data": {id, type, url}}]`.
+
+The underscore id on a v1 path (or vice-versa) returns `405 Method Not Allowed`. The MCP
+picks the endpoint from `api_version` (`generate_image(api_version=...)`,
+`generate_raw(api_version=...)`); video is always v2.
+
+### Video params (v2)
+
+`params` needs `prompt`, `aspect_ratio`, `batch_size`, `duration`, `resolution`
+(`480p/720p/1080p/4k`), `width`, `height` (short side from the tier, long side from the
+aspect ratio — the server recomputes), and usually `generate_audio` + `mode` (`std`/`fast`
+for Seedance). Image-to-video attaches a start frame via
+`medias: [{role: "start_image", data: {...}}]`. **Input media must pass an IP check first**
+or the job fails `400 {"error_type":"other","text":"IP check not finished for input media"}` —
+text-to-video has no such dependency.
+
 ## `use_unlim` is enforced server-side, per model + account
 
 Setting `use_unlim: true` does **not** guarantee unlimited generation. The server

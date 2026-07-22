@@ -185,6 +185,57 @@ Or from inside Claude Code:
 
 ---
 
+## Multiple accounts (parallel generation)
+
+A single account serialises jobs behind a per-account rate limit — hit it and the API
+returns `429 rate_limit_reached`. Connect several accounts and the server load-balances
+across them and fails a job over to another account on 429, so many generations run in
+parallel.
+
+Add numbered credentials in the `env` block — `_2`, `_3`, `_4`, `_5`, … each with its own
+session id, `__client` cookie, and `datadome` cookie:
+
+```json
+"env": {
+  "HIGGSFIELD_SESSION_ID": "sess_a...",
+  "HIGGSFIELD_CLERK_COOKIE": "eyJ...a",
+  "HIGGSFIELD_EXTRA_COOKIES": "datadome=aaaa",
+
+  "HIGGSFIELD_SESSION_ID_2": "sess_b...",
+  "HIGGSFIELD_CLERK_COOKIE_2": "eyJ...b",
+  "HIGGSFIELD_EXTRA_COOKIES_2": "datadome=bbbb",
+
+  "HIGGSFIELD_SESSION_ID_3": "sess_c...",
+  "HIGGSFIELD_CLERK_COOKIE_3": "eyJ...c",
+  "HIGGSFIELD_EXTRA_COOKIES_3": "datadome=cccc"
+}
+```
+
+`auth_status` reports every account; `queue_status` shows per-account in-flight jobs;
+each generation and every prompt in `generate_image_batch` is routed to the least-busy
+account. (You can also pass all accounts as one JSON array via `HIGGSFIELD_ACCOUNTS_JSON`.)
+
+> Image-to-image / image-to-video needs the input media uploaded **on the account that
+> generates**, so the pool uploads local `input_files` per-account. Pre-uploaded media ids
+> are account-specific.
+
+## Video (viral 9:16) & resolution fallback
+
+`generate_video` targets vertical 9:16 clips and uses the v2 API. Unlimited video is
+capped per model (Seedance / Wan / Gemini render unlimited at **720p**), so it walks the
+requested resolution down the ladder — `1080p → 720p → 480p` — whenever the server denies
+unlimited at a tier, landing on the best resolution your plan actually allows:
+
+```
+generate_video(prompt="neon city rain at night, moody", model="seedance_2_0",
+               aspect_ratio="9:16", duration=5, resolution="1080p")
+# -> tries 1080p (denied unlimited) -> 720p (granted) -> returns the 720p clip
+```
+
+Unlimited-eligible video models on a 1-day-unlimited Plus plan: `seedance_2_0`,
+`seedance_2_0_mini`, `wan2_7`, `gemini_omni`, `kling3_0`. A `429` (rate limit) is **not**
+a resolution problem — the pool fails it over to another account instead of downgrading.
+
 ## Configuration reference
 
 | Variable | Default | Description |
@@ -192,6 +243,8 @@ Or from inside Claude Code:
 | `HIGGSFIELD_CLERK_COOKIE` | *(required)* | The `__client` cookie from your browser. |
 | `HIGGSFIELD_SESSION_ID` | *(required)* | `window.Clerk.session.id`. |
 | `HIGGSFIELD_EXTRA_COOKIES` | *(often required)* | Extra browser cookies forwarded to the API, e.g. `datadome=...`. The `/jobs` create endpoint sits behind DataDome; without your browser's `datadome` cookie, `POST /jobs/{model}` returns a `403` captcha challenge. Get it from DevTools → Console: `document.cookie`. This cookie rotates, so refresh it when generation starts 403-ing. |
+| `HIGGSFIELD_SESSION_ID_2..N` | *(optional)* | Additional accounts for parallel generation. Also `HIGGSFIELD_CLERK_COOKIE_2..N` and `HIGGSFIELD_EXTRA_COOKIES_2..N`. See [Multiple accounts](#multiple-accounts-parallel-generation). |
+| `HIGGSFIELD_ACCOUNTS_JSON` | *(optional)* | Alternative: all accounts as a JSON array `[{"session_id","clerk_cookie","extra_cookies","label"}]`. |
 | `HIGGSFIELD_MAX_CONCURRENT` | `4` | Max parallel jobs (match your plan tier: 4/8/12/16). |
 | `HIGGSFIELD_DEFAULT_MODEL` | `nano-banana-2` | Image model used when not specified. |
 | `HIGGSFIELD_DEFAULT_RESOLUTION` | `2k` | One of `1k`, `2k`, `4k`. |

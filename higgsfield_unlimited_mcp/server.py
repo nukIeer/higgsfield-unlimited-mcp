@@ -138,15 +138,21 @@ async def list_models(category: str | None = None) -> str:
         {
             "id": m.id,
             "category": m.category,
-            "note": m.note,
+            "api_version": m.api_version,
+            "unlimited": m.unlimited,
+            "unlimited_max_resolution": m.unlimited_max,
+            "resolutions": list(m.resolutions),
             "needs_input": m.needs_input,
-            "required_extra": list(m.required_extra),
+            "note": m.note,
         }
         for m in specs
     ]
-    return _jdump(
-        {"count": len(out), "counts_by_category": model_registry.category_counts(), "models": out}
-    )
+    return _jdump({
+        "count": len(out),
+        "counts_by_category": model_registry.category_counts(),
+        "unlimited_ids": [m.id for m in model_registry.unlimited_models(category)],
+        "models": out,
+    })
 
 
 @mcp.tool()
@@ -173,6 +179,7 @@ async def _build_image_params(
     input_files: list[str] | None,
     input_images: list | None,
     extra_params: dict[str, Any] | None,
+    api_version: str = "v1",
 ) -> dict[str, Any]:
     width, height = dims.get_dimensions(aspect_ratio, resolution)
     params: dict[str, Any] = {
@@ -189,7 +196,10 @@ async def _build_image_params(
         params["negative_prompt"] = negative_prompt
     media = await svc.resolve_inputs(input_files, input_images)
     if media:
-        params["input_images"] = media
+        if api_version == "v2":
+            params["medias"] = svc.to_v2_medias(media, role="image")
+        else:
+            params["input_images"] = media
     if extra_params:
         params.update(extra_params)
     return params
@@ -201,6 +211,7 @@ async def generate_image(
     model: str | None = None,
     aspect_ratio: str = "16:9",
     resolution: str | None = None,
+    api_version: str = "v1",
     seed: int | None = None,
     negative_prompt: str | None = None,
     batch_size: int = 1,
@@ -211,11 +222,15 @@ async def generate_image(
     download: bool = True,
     timeout: float = 300.0,
 ) -> str:
-    """Generate a single image (or a small batch of the same prompt).
+    """Generate a single image, unlimited, across the account pool.
 
-    32 image models are available (nano-banana-2, flux-2, seedream-v4-5,
-    openai-hazel, reve, z-image, ...). Local files in ``input_files`` are
-    auto-uploaded and passed as input images. Set ``wait=False`` to fire-and-forget.
+    ``model`` uses the API path form: v1 models use dashes (``nano-banana-2``,
+    ``nano-banana-pro``); v2 models use underscores + ``api_version="v2"``
+    (``seedream_v5_pro``, ``seedream_v5_lite``, ``flux_2``, ``gpt_image_2``, ``soul_2``,
+    ``kling_omni_image``). Unlimited-eligible on a typical plan: nano_banana_2,
+    nano_banana_pro, gpt_image_2, seedream_v5_pro, seedream_v4_5, soul_2,
+    seedream_v5_lite, flux_2, kling_omni_image. Local ``input_files`` are auto-uploaded.
+    See ``list_models`` and ``account_info`` for what's unlimited on your plan.
     """
     cfg = get_config()
     model = model or cfg.default_model
@@ -224,9 +239,10 @@ async def generate_image(
         async def _submit(svc: Service):
             params = await _build_image_params(
                 svc, prompt, aspect_ratio, resolution, seed, negative_prompt,
-                batch_size, input_files, input_images, extra_params,
+                batch_size, input_files, input_images, extra_params, api_version,
             )
-            return await svc.submit(model=model, params=params, kind="image", prompt=prompt)
+            submit = svc.submit_v2 if api_version == "v2" else svc.submit
+            return await submit(model=model, params=params, kind="image", prompt=prompt)
 
         result = await _pool().run_job(_submit, wait=wait, download=download, timeout=timeout)
         return _jdump(result)

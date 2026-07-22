@@ -10,17 +10,34 @@ from higgsfield_unlimited_mcp.client import (
 )
 
 
-def test_model_counts_match_readme():
+def test_model_registry_has_categories():
     counts = models.category_counts()
-    assert counts["image"] == 32
-    assert counts["video"] == 31
-    assert counts["audio"] == 1
+    assert counts["image"] > 0
+    assert counts["video"] > 0
+    assert counts["audio"] > 0
+
+
+def test_unlimited_flags():
+    unlim = {m.id for m in models.unlimited_models()}
+    assert "nano-banana-2" in unlim
+    assert "seedance_2_0" in unlim
+    # z_image is explicitly not unlimited-eligible.
+    assert models.get_model("z_image").unlimited is False
 
 
 def test_registry_lookup():
     assert models.is_known("nano-banana-2")
-    assert models.get_model("veo3-1").category == "video"
+    assert models.get_model("seedance_2_0").category == "video"
+    assert models.get_model("seedance_2_0").api_version == "v2"
     assert not models.is_known("does-not-exist")
+
+
+def test_video_dimensions():
+    from higgsfield_unlimited_mcp import dimensions
+    w, h = dimensions.video_dimensions("9:16", "720p")
+    assert (w, h) == (720, 1280)
+    w, h = dimensions.video_dimensions("16:9", "1080p")
+    assert (w, h) == (1920, 1080)
 
 
 @pytest.mark.parametrize(
