@@ -229,6 +229,20 @@ class HiggsfieldClient:
         url = f"{API_BASE}/jobs/{model}"
         return await self.request("POST", url, json=body)
 
+    async def submit_job_v2(self, model: str, params: dict[str, Any]) -> dict[str, Any]:
+        """POST /jobs/v2/{model} — the newer API generation (video + newer image models).
+
+        v2 differs from v1: the path is ``/jobs/v2/{underscore_id}``, ``params`` carries
+        a ``model`` field, and input media go under ``medias`` as
+        ``[{"role": ..., "data": {id, type, url}}]`` (see docs/MODEL_SCHEMAS.md).
+        """
+        params = dict(params)
+        params["use_unlim"] = True
+        params["model"] = model
+        body = {"params": params, "use_unlim": True}
+        url = f"{API_BASE}/jobs/v2/{model}"
+        return await self.request("POST", url, json=body)
+
     async def poll_job(self, job_id: str) -> dict[str, Any]:
         """GET /jobs/{id}."""
         url = f"{API_BASE}/jobs/{job_id}"

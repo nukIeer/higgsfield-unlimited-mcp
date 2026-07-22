@@ -34,6 +34,43 @@ def _round32(x: float) -> int:
     return max(32, int(round(x / 32.0)) * 32)
 
 
+# Video resolution tiers -> short-side pixel length.
+_VIDEO_SHORT_SIDE: dict[str, int] = {
+    "480p": 480,
+    "720p": 720,
+    "1080p": 1080,
+    "4k": 2160,
+    "2160p": 2160,
+}
+
+
+def _round_even(x: float) -> int:
+    return max(2, int(round(x / 2.0)) * 2)
+
+
+def video_dimensions(aspect_ratio: str, resolution: str = "720p") -> tuple[int, int]:
+    """Return (width, height) for a video aspect ratio + resolution tier.
+
+    The short side is fixed by the tier (720p -> 720px short side); the long side
+    follows the aspect ratio. Values are rounded to even numbers (codec-friendly).
+    The server recomputes exact dims, so this only needs to be valid and consistent.
+    """
+    res = resolution.strip().lower()
+    short = _VIDEO_SHORT_SIDE.get(res)
+    if short is None:
+        raise ValueError(
+            f"Unknown video resolution {resolution!r}. Supported: {', '.join(_VIDEO_SHORT_SIDE)}"
+        )
+    try:
+        w_ratio, h_ratio = (float(p) for p in aspect_ratio.split(":"))
+    except ValueError as exc:
+        raise ValueError(f"Bad aspect ratio {aspect_ratio!r}, expected 'W:H'.") from exc
+    ratio = w_ratio / h_ratio
+    if ratio <= 1:  # portrait / square: short side is the width
+        return _round_even(short), _round_even(short / ratio)
+    return _round_even(short * ratio), _round_even(short)  # landscape: short side is height
+
+
 def get_dimensions(aspect_ratio: str, resolution: str = "2k") -> tuple[int, int]:
     """Return (width, height) for an aspect ratio + resolution tier.
 

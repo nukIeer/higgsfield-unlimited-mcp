@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -102,6 +103,66 @@ class Config:
     def ensure_output_dir(self) -> Path:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         return self.output_dir
+
+
+@dataclass
+class Account:
+    """One Higgsfield login. Multiple accounts run in parallel to sidestep the
+    per-account concurrency / rate limit (429 rate_limit_reached)."""
+
+    label: str
+    session_id: str
+    clerk_cookie: str
+    extra_cookies: str = ""
+
+    def is_valid(self) -> bool:
+        return bool(self.session_id and self.clerk_cookie)
+
+
+def enumerate_accounts() -> list[Account]:
+    """Discover all configured accounts.
+
+    Sources (all merged, de-duplicated by session_id):
+      1. Primary: ``HIGGSFIELD_SESSION_ID`` / ``HIGGSFIELD_CLERK_COOKIE`` /
+         ``HIGGSFIELD_EXTRA_COOKIES``.
+      2. Numbered: ``HIGGSFIELD_SESSION_ID_2`` / ``..._CLERK_COOKIE_2`` / ``..._EXTRA_COOKIES_2``
+         for 2..N (contiguous; stops at the first missing index).
+      3. JSON: ``HIGGSFIELD_ACCOUNTS_JSON`` = a JSON array of
+         ``{"session_id","clerk_cookie","extra_cookies","label"}`` objects.
+    """
+    accounts: list[Account] = []
+    seen: set[str] = set()
+
+    def _add(label: str, sid: str, cookie: str, extra: str) -> None:
+        sid = (sid or "").strip()
+        if not sid or sid in seen:
+            return
+        seen.add(sid)
+        accounts.append(Account(label=label, session_id=sid, clerk_cookie=(cookie or "").strip(),
+                                extra_cookies=(extra or "").strip()))
+
+    _add("account-1", os.environ.get("HIGGSFIELD_SESSION_ID", ""),
+         os.environ.get("HIGGSFIELD_CLERK_COOKIE", ""),
+         os.environ.get("HIGGSFIELD_EXTRA_COOKIES", ""))
+
+    for i in range(2, 33):
+        sid = os.environ.get(f"HIGGSFIELD_SESSION_ID_{i}")
+        if not sid:
+            break
+        _add(f"account-{i}", sid,
+             os.environ.get(f"HIGGSFIELD_CLERK_COOKIE_{i}", ""),
+             os.environ.get(f"HIGGSFIELD_EXTRA_COOKIES_{i}", ""))
+
+    raw = os.environ.get("HIGGSFIELD_ACCOUNTS_JSON")
+    if raw:
+        try:
+            for j, item in enumerate(json.loads(raw), start=1):
+                _add(item.get("label") or f"json-{j}", item.get("session_id", ""),
+                     item.get("clerk_cookie", ""), item.get("extra_cookies", ""))
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    return accounts
 
 
 _config: Config | None = None

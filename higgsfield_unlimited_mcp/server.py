@@ -19,20 +19,29 @@ from .client import HiggsfieldError
 from .config import get_config
 from . import dimensions as dims
 from . import models as model_registry
+from .pool import get_pool
 from .service import Service
 
 log = logging.getLogger("higgsfield.server")
 
 mcp = FastMCP("higgsfield-unlimited")
 
-_service: Service | None = None
+
+def _pool():
+    return get_pool()
 
 
 def _svc() -> Service:
-    global _service
-    if _service is None:
-        _service = Service(get_config())
-    return _service
+    """Primary account's service — for per-account read/job tools."""
+    return get_pool().primary()
+
+
+def _find_service(job_id: str) -> Service:
+    """Return the account whose registry owns this job (else primary)."""
+    for svc in get_pool().services:
+        if svc.registry.get(job_id) is not None:
+            return svc
+    return get_pool().primary()
 
 
 def _jdump(obj: Any) -> str:
@@ -67,24 +76,27 @@ def _job_summary(rec: Any, saved: list[str] | None = None) -> dict[str, Any]:
 # ======================================================================= #
 @mcp.tool()
 async def auth_status() -> str:
-    """Verify Clerk credentials by fetching a fresh JWT."""
-    cfg = get_config()
-    problems = cfg.validate()
-    if problems:
-        return _jdump({"ok": False, "problems": problems})
-    try:
-        jwt = await _svc().client.auth.get_jwt(force=True)
-        return _jdump(
-            {
-                "ok": True,
-                "session_id": cfg.session_id,
-                "jwt_prefix": jwt[:16] + "...",
-                "jwt_length": len(jwt),
-                "message": "Clerk JWT minted successfully.",
-            }
-        )
-    except Exception as exc:  # noqa: BLE001
-        return _err(exc)
+    """Verify credentials for every configured account by minting a fresh JWT each."""
+    pool = _pool()
+    results = []
+    ok_count = 0
+    for svc, label in zip(pool.services, pool.labels):
+        entry: dict[str, Any] = {"account": label, "session_id": svc.config.session_id[:16] + "..."}
+        if not svc.config.session_id or not svc.config.clerk_cookie:
+            entry["ok"] = False
+            entry["problem"] = "missing session_id or clerk_cookie"
+        else:
+            try:
+                jwt = await svc.client.auth.get_jwt(force=True)
+                entry["ok"] = True
+                entry["jwt_length"] = len(jwt)
+                entry["has_datadome"] = "datadome=" in svc.config.extra_cookies
+                ok_count += 1
+            except Exception as exc:  # noqa: BLE001
+                entry["ok"] = False
+                entry["problem"] = str(exc)
+        results.append(entry)
+    return _jdump({"accounts": len(results), "authenticated": ok_count, "results": results})
 
 
 @mcp.tool()
@@ -111,8 +123,8 @@ async def concurrent_state() -> str:
 
 @mcp.tool()
 async def queue_status() -> str:
-    """Snapshot of the in-process job registry (jobs submitted this session)."""
-    return _jdump(_svc().registry.snapshot())
+    """Snapshot of in-flight jobs across all accounts in the pool."""
+    return _jdump(_pool().snapshot())
 
 
 # ======================================================================= #
@@ -151,6 +163,7 @@ async def get_aspect_dimensions(aspect_ratio: str, resolution: str = "2k") -> st
 # Image generation
 # ======================================================================= #
 async def _build_image_params(
+    svc: Service,
     prompt: str,
     aspect_ratio: str,
     resolution: str,
@@ -158,7 +171,7 @@ async def _build_image_params(
     negative_prompt: str | None,
     batch_size: int,
     input_files: list[str] | None,
-    input_images: list[str] | None,
+    input_images: list | None,
     extra_params: dict[str, Any] | None,
 ) -> dict[str, Any]:
     width, height = dims.get_dimensions(aspect_ratio, resolution)
@@ -174,9 +187,9 @@ async def _build_image_params(
         params["seed"] = seed
     if negative_prompt:
         params["negative_prompt"] = negative_prompt
-    urls = await _svc().resolve_inputs(input_files, input_images)
-    if urls:
-        params["input_images"] = urls
+    media = await svc.resolve_inputs(input_files, input_images)
+    if media:
+        params["input_images"] = media
     if extra_params:
         params.update(extra_params)
     return params
@@ -208,17 +221,15 @@ async def generate_image(
     model = model or cfg.default_model
     resolution = resolution or cfg.default_resolution
     try:
-        params = await _build_image_params(
-            prompt, aspect_ratio, resolution, seed, negative_prompt,
-            batch_size, input_files, input_images, extra_params,
-        )
-        rec = await _svc().submit(model=model, params=params, kind="image", prompt=prompt)
-        if wait and not rec.is_terminal:
-            rec = await _svc().wait(rec.id, timeout=timeout)
-        saved = None
-        if download and rec.status == "completed" and rec.results:
-            saved = await _svc().download_results(rec)
-        return _jdump(_job_summary(rec, saved))
+        async def _submit(svc: Service):
+            params = await _build_image_params(
+                svc, prompt, aspect_ratio, resolution, seed, negative_prompt,
+                batch_size, input_files, input_images, extra_params,
+            )
+            return await svc.submit(model=model, params=params, kind="image", prompt=prompt)
+
+        result = await _pool().run_job(_submit, wait=wait, download=download, timeout=timeout)
+        return _jdump(result)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -246,28 +257,27 @@ async def generate_image_batch(
     cfg = get_config()
     model = model or cfg.default_model
     resolution = resolution or cfg.default_resolution
-    limit = max_concurrent or cfg.max_concurrent
+    # Cap total in-flight across the whole pool; the pool spreads them over accounts
+    # and fails over on 429.
+    pool = _pool()
+    limit = max_concurrent or (cfg.max_concurrent * len(pool.services))
     sema = asyncio.Semaphore(max(1, limit))
 
     async def _one(p: str) -> dict[str, Any]:
         async with sema:
-            try:
+            async def _submit(svc: Service):
                 params = await _build_image_params(
-                    p, aspect_ratio, resolution, None, None, 1,
+                    svc, p, aspect_ratio, resolution, None, None, 1,
                     input_files, input_images, extra_params,
                 )
-                rec = await _svc().submit(model=model, params=params, kind="image", prompt=p)
-                if wait and not rec.is_terminal:
-                    rec = await _svc().wait(rec.id, timeout=timeout)
-                saved = None
-                if download and rec.status == "completed" and rec.results:
-                    saved = await _svc().download_results(rec)
-                return _job_summary(rec, saved)
+                return await svc.submit(model=model, params=params, kind="image", prompt=p)
+            try:
+                return await pool.run_job(_submit, wait=wait, download=download, timeout=timeout)
             except Exception as exc:  # noqa: BLE001
                 return {"prompt": p, "error": str(exc)}
 
     results = await asyncio.gather(*[_one(p) for p in prompts])
-    return _jdump({"submitted": len(results), "jobs": results})
+    return _jdump({"submitted": len(results), "accounts": len(pool.services), "jobs": results})
 
 
 @mcp.tool()
@@ -293,28 +303,28 @@ async def generate_storyboard(
     resolution = resolution or cfg.default_resolution
     try:
         width, height = dims.get_dimensions(aspect_ratio, resolution)
-        refs = await _svc().resolve_inputs(reference_files, reference_images)
-        params: dict[str, Any] = {
-            "prompt": shots[0] if shots else "",
-            "shots": [{"prompt": s} for s in shots],
-            "width": width,
-            "height": height,
-            "aspect_ratio": aspect_ratio,
-            "resolution": resolution,
-        }
-        if refs:
-            params["input_images"] = refs
-        if extra_params:
-            params.update(extra_params)
-        rec = await _svc().submit(
-            model=model, params=params, kind="storyboard", prompt=f"{len(shots)}-shot storyboard"
-        )
-        if wait and not rec.is_terminal:
-            rec = await _svc().wait(rec.id, timeout=timeout)
-        saved = None
-        if download and rec.status == "completed" and rec.results:
-            saved = await _svc().download_results(rec)
-        return _jdump(_job_summary(rec, saved))
+
+        async def _submit(svc: Service):
+            refs = await svc.resolve_inputs(reference_files, reference_images)
+            params: dict[str, Any] = {
+                "prompt": shots[0] if shots else "",
+                "shots": [{"prompt": s} for s in shots],
+                "width": width,
+                "height": height,
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+            }
+            if refs:
+                params["input_images"] = refs
+            if extra_params:
+                params.update(extra_params)
+            return await svc.submit(
+                model=model, params=params, kind="storyboard",
+                prompt=f"{len(shots)}-shot storyboard",
+            )
+
+        result = await _pool().run_job(_submit, wait=wait, download=download, timeout=timeout)
+        return _jdump(result)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -322,51 +332,122 @@ async def generate_storyboard(
 # ======================================================================= #
 # Video generation
 # ======================================================================= #
+# Resolution ladder, highest -> lowest. Fallback walks down from the request.
+_RES_LADDER = ["4k", "1080p", "720p", "480p"]
+
+
+def _resolution_chain(preferred: str) -> list[str]:
+    """Return resolutions to try, starting at `preferred` and descending."""
+    preferred = preferred.lower()
+    if preferred not in _RES_LADDER:
+        return [preferred, "720p", "480p"]
+    return _RES_LADDER[_RES_LADDER.index(preferred):]
+
+
+def _is_unlim_denied(exc: HiggsfieldError) -> bool:
+    body = exc.body
+    if isinstance(body, dict):
+        detail = body.get("detail")
+        if isinstance(detail, dict) and detail.get("error_type") == "unlimited_generation_not_allowed":
+            return True
+    return False
+
+
 @mcp.tool()
 async def generate_video(
     prompt: str,
-    model: str = "seedance",
-    aspect_ratio: str = "16:9",
-    duration: int | None = None,
-    resolution: str | None = None,
+    model: str = "seedance_2_0",
+    aspect_ratio: str = "9:16",
+    duration: int = 5,
+    resolution: str = "1080p",
+    resolution_fallback: bool = True,
     input_files: list[str] | None = None,
-    input_images: list[str] | None = None,
+    input_images: list | None = None,
+    media_role: str = "start_image",
+    generate_audio: bool = True,
+    mode: str | None = "std",
     seed: int | None = None,
     extra_params: dict[str, Any] | None = None,
     wait: bool = True,
     download: bool = True,
-    timeout: float = 600.0,
+    timeout: float = 900.0,
 ) -> str:
-    """Generate a video (31 models: seedance, kling/kling2-6, sora2-video, veo3/veo3-1,
-    minimax-hailuo, wan2-*, image2video, infinite-talk, ...).
+    """Generate a video via the v2 API, with automatic resolution fallback.
 
-    Each video model needs different fields. On a 422 the error tells you exactly
-    which fields to add via ``extra_params`` (or use ``generate_raw``). Local files
-    in ``input_files`` are auto-uploaded for image-to-video.
+    Defaults target viral 9:16 clips. Because unlimited access is capped per model
+    (e.g. Seedance/Wan/Gemini unlimited render at 720p), ``resolution_fallback`` walks
+    the requested resolution down the ladder (1080p -> 720p -> 480p) whenever the server
+    returns ``unlimited_generation_not_allowed`` or rejects the resolution — so you get
+    the highest resolution your unlimited plan actually allows.
+
+    Unlimited-eligible video models on a typical plan: ``seedance_2_0``,
+    ``seedance_2_0_mini``, ``wan2_7``, ``gemini_omni``, ``kling3_0``. Local
+    ``input_files`` are uploaded and attached as ``medias`` (role ``start_image`` for
+    image-to-video). Use ``extra_params`` for model-specific fields.
     """
     try:
-        params: dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
-        if duration is not None:
-            params["duration"] = duration
-        if resolution:
-            params["resolution"] = resolution
-            # For video the platform commonly wants a quality/height hint too.
-            params.setdefault("quality", resolution)
-        if seed is not None:
-            params["seed"] = seed
-        urls = await _svc().resolve_inputs(input_files, input_images)
-        if urls:
-            params["input_images"] = urls
-            params.setdefault("image_url", urls[0].get("url"))
-        if extra_params:
-            params.update(extra_params)
-        rec = await _svc().submit(model=model, params=params, kind="video", prompt=prompt)
-        if wait and not rec.is_terminal:
-            rec = await _svc().wait(rec.id, timeout=timeout)
-        saved = None
-        if download and rec.status == "completed" and rec.results:
-            saved = await _svc().download_results(rec)
-        return _jdump(_job_summary(rec, saved))
+        chain = _resolution_chain(resolution) if resolution_fallback else [resolution]
+        res_attempts: list[dict[str, Any]] = []
+
+        for res in chain:
+            try:
+                vw, vh = dims.video_dimensions(aspect_ratio, res)
+            except ValueError:
+                vw, vh = dims.video_dimensions("9:16", res)
+
+            async def _submit(svc: Service, _res=res, _vw=vw, _vh=vh):
+                media_objs = await svc.resolve_inputs(input_files, input_images)
+                params: dict[str, Any] = {
+                    "prompt": prompt,
+                    "aspect_ratio": aspect_ratio,
+                    "batch_size": 1,
+                    "duration": duration,
+                    "resolution": _res,
+                    "generate_audio": generate_audio,
+                    "width": _vw,
+                    "height": _vh,
+                }
+                if mode:
+                    params["mode"] = mode
+                if seed is not None:
+                    params["seed"] = seed
+                if media_objs:
+                    params["medias"] = svc.to_v2_medias(media_objs, role=media_role)
+                if extra_params:
+                    params.update(extra_params)
+                return await svc.submit_v2(model=model, params=params, kind="video", prompt=prompt)
+
+            try:
+                result = await _pool().run_job(
+                    _submit, wait=wait, download=download, timeout=timeout
+                )
+            except HiggsfieldError as exc:
+                res_attempts.append({"resolution": res, "status": exc.status,
+                                     "denied_unlim": _is_unlim_denied(exc)})
+                # Unlimited denied at this resolution -> step down. Other hard errors stop.
+                if _is_unlim_denied(exc) or exc.status in (400, 422):
+                    continue
+                return _err(exc)
+
+            # run_job returned: either a job summary, or an all-accounts-rate-limited dict.
+            if result.get("error") and "rate-limited" in str(result.get("error", "")):
+                # Lower resolution won't fix a rate limit; surface it (add more accounts).
+                result["resolution_tried"] = res
+                if res_attempts:
+                    result["resolution_attempts"] = res_attempts
+                return _jdump(result)
+
+            result["resolution_used"] = res
+            if res_attempts:
+                result["resolution_attempts"] = res_attempts
+            return _jdump(result)
+
+        return _jdump({
+            "error": "Every resolution in the fallback chain was denied for unlimited.",
+            "model": model,
+            "resolution_attempts": res_attempts,
+            "hint": "This model may not be unlimited-eligible on your plan. Check account_info.",
+        })
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -386,18 +467,16 @@ async def generate_audio(
 ) -> str:
     """Text-to-speech via the text2speech model."""
     try:
-        params: dict[str, Any] = {"text": text}
-        if voice:
-            params["voice"] = voice
-        if extra_params:
-            params.update(extra_params)
-        rec = await _svc().submit(model=model, params=params, kind="audio", prompt=text[:80])
-        if wait and not rec.is_terminal:
-            rec = await _svc().wait(rec.id, timeout=timeout)
-        saved = None
-        if download and rec.status == "completed" and rec.results:
-            saved = await _svc().download_results(rec)
-        return _jdump(_job_summary(rec, saved))
+        async def _submit(svc: Service):
+            params: dict[str, Any] = {"text": text}
+            if voice:
+                params["voice"] = voice
+            if extra_params:
+                params.update(extra_params)
+            return await svc.submit(model=model, params=params, kind="audio", prompt=text[:80])
+
+        result = await _pool().run_job(_submit, wait=wait, download=download, timeout=timeout)
+        return _jdump(result)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -410,32 +489,32 @@ async def generate_raw(
     model: str,
     params: dict[str, Any],
     kind: str = "raw",
+    api_version: str = "v1",
     input_files: list[str] | None = None,
     wait: bool = True,
     download: bool = False,
     timeout: float = 600.0,
 ) -> str:
-    """Escape hatch: call any model with a custom params dict.
+    """Escape hatch: call any model with a custom params dict, across the account pool.
 
     Use for face-swap, character-swap, upscale, inpaint, or any model whose exact
-    schema you already know (see docs/MODEL_SCHEMAS.md). ``params`` is passed
-    through verbatim (with use_unlim added). Local ``input_files`` are uploaded and
-    merged into ``params['input_images']``.
+    schema you already know (see docs/MODEL_SCHEMAS.md). ``params`` is passed through
+    verbatim (with use_unlim added). ``api_version`` selects the endpoint: ``v1``
+    (`/jobs/{model}`) or ``v2`` (`/jobs/v2/{model}`, newer models incl. most video).
+    Local ``input_files`` are uploaded and merged into ``params['input_images']``.
     """
     try:
-        params = dict(params)
-        if input_files:
-            urls = await _svc().resolve_inputs(input_files, params.get("input_images"))
-            params["input_images"] = urls
-        rec = await _svc().submit(
-            model=model, params=params, kind=kind, prompt=str(params.get("prompt", ""))[:80]
-        )
-        if wait and not rec.is_terminal:
-            rec = await _svc().wait(rec.id, timeout=timeout)
-        saved = None
-        if download and rec.status == "completed" and rec.results:
-            saved = await _svc().download_results(rec)
-        return _jdump(_job_summary(rec, saved))
+        async def _submit(svc: Service):
+            p = dict(params)
+            if input_files:
+                p["input_images"] = await svc.resolve_inputs(input_files, p.get("input_images"))
+            submit = svc.submit_v2 if api_version == "v2" else svc.submit
+            return await submit(
+                model=model, params=p, kind=kind, prompt=str(p.get("prompt", ""))[:80]
+            )
+
+        result = await _pool().run_job(_submit, wait=wait, download=download, timeout=timeout)
+        return _jdump(result)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -445,9 +524,9 @@ async def generate_raw(
 # ======================================================================= #
 @mcp.tool()
 async def check_job(job_id: str) -> str:
-    """Poll a single job (checks the local registry, then the remote API)."""
+    """Poll a single job across the account pool (local registry, then remote API)."""
     try:
-        rec = await _svc().refresh(job_id)
+        rec = await _find_service(job_id).refresh(job_id)
         if rec is None:
             return _jdump({"error": f"Job {job_id} not found."})
         return _jdump(_job_summary(rec))
@@ -461,10 +540,11 @@ async def wait_for_job(
 ) -> str:
     """Block until a job finishes; optionally download its results."""
     try:
-        rec = await _svc().wait(job_id, timeout=timeout, interval=interval)
+        svc = _find_service(job_id)
+        rec = await svc.wait(job_id, timeout=timeout, interval=interval)
         saved = None
         if download and rec and rec.status == "completed" and rec.results:
-            saved = await _svc().download_results(rec)
+            saved = await svc.download_results(rec)
         return _jdump(_job_summary(rec, saved))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -474,7 +554,7 @@ async def wait_for_job(
 async def cancel_job(job_id: str) -> str:
     """Cancel an in-progress job (DELETE /jobs/{id})."""
     try:
-        rec = await _svc().cancel(job_id)
+        rec = await _find_service(job_id).cancel(job_id)
         return _jdump(_job_summary(rec))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -482,21 +562,29 @@ async def cancel_job(job_id: str) -> str:
 
 @mcp.tool()
 async def list_jobs() -> str:
-    """List all jobs in the local (this-session) registry."""
-    return _jdump({"jobs": [r.to_dict() for r in _svc().registry.all()]})
+    """List all jobs across every account in the pool (this session)."""
+    jobs: list[dict[str, Any]] = []
+    for svc, label in zip(_pool().services, _pool().labels):
+        for r in svc.registry.all():
+            d = r.to_dict()
+            d["account"] = label
+            jobs.append(d)
+    jobs.sort(key=lambda d: d.get("created_at", 0), reverse=True)
+    return _jdump({"jobs": jobs})
 
 
 @mcp.tool()
 async def download_job_result(job_id: str, output_dir: str | None = None) -> str:
     """Re-fetch a completed job's results and save them to disk."""
     try:
-        rec = await _svc().refresh(job_id)
+        svc = _find_service(job_id)
+        rec = await svc.refresh(job_id)
         if rec is None:
             return _jdump({"error": f"Job {job_id} not found."})
         if not rec.results:
             return _jdump({"error": f"Job {job_id} has no downloadable results.", "status": rec.status})
         out = Path(output_dir) if output_dir else None
-        saved = await _svc().download_results(rec, out)
+        saved = await svc.download_results(rec, out)
         return _jdump({"job_id": job_id, "downloaded": saved})
     except Exception as exc:  # noqa: BLE001
         return _err(exc)

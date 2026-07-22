@@ -107,6 +107,39 @@ class Service:
         self.registry.add(rec)
         return rec
 
+    async def submit_v2(
+        self,
+        *,
+        model: str,
+        params: dict[str, Any],
+        kind: str,
+        prompt: str | None = None,
+    ) -> JobRecord:
+        """Submit via the v2 endpoint (/jobs/v2/{model})."""
+        async with self._sema:
+            response = await self.client.submit_job_v2(model, params)
+        job_id = extract_job_id(response) or f"local-{int(time.time() * 1000)}"
+        status = normalize_status(response)
+        rec = JobRecord(
+            id=job_id,
+            model=model,
+            kind=kind,
+            status=status if status != "unknown" else STATUS_RUNNING,
+            prompt=prompt,
+            raw=response if isinstance(response, dict) else {"response": response},
+        )
+        results = extract_result_urls(response)
+        if results:
+            rec.results = results
+            rec.status = STATUS_COMPLETED
+        self.registry.add(rec)
+        return rec
+
+    @staticmethod
+    def to_v2_medias(media_objs: list[dict[str, Any]], role: str = "image") -> list[dict[str, Any]]:
+        """Wrap resolved media objects into v2 ``medias`` entries: {role, data}."""
+        return [{"role": role, "data": obj} for obj in media_objs]
+
     # ------------------------------------------------------------------ #
     # Poll a single job (refresh registry from remote)
     # ------------------------------------------------------------------ #
