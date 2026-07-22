@@ -122,6 +122,50 @@ async def concurrent_state() -> str:
 
 
 @mcp.tool()
+async def estimate_cost(account: str | int | None = None) -> str:
+    """Credit cost table per model / resolution / mode — WITHOUT spending credits.
+
+    Reads GET /job-sets/costs. Use this before generating on credits (unlimited jobs
+    cost 0). e.g. seedance_2_0 720p ~4.5 credits/second; an 8s clip ~36 credits.
+    Check `unlimited_status` first — if a model is unlimited-active for you, it's free.
+    """
+    try:
+        svc = _pool().services[account] if isinstance(account, int) else _svc()
+        res = await svc.try_get(["/job-sets/costs"])
+        return _jdump(res)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
+async def unlimited_status(account: str | int | None = None) -> str:
+    """Which models are currently unlimited-active for the account.
+
+    Reads /workspaces/unlim-activations, /subscriptions/bundle/all-unlim/status, and
+    /user (has_unlim). An empty `activations` list means no active unlimited right now —
+    generation would then cost credits (see `estimate_cost`).
+    """
+    try:
+        svc = _pool().services[account] if isinstance(account, int) else _svc()
+        activations = await svc.try_get(["/workspaces/unlim-activations"])
+        out: dict[str, Any] = {"activations": activations.get("data")}
+        try:
+            out["bundle_status"] = (await svc.try_get(["/subscriptions/bundle/all-unlim/status"]))["data"]
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            user = (await svc.try_get(["/user"]))["data"]
+            out["has_unlim"] = user.get("has_unlim")
+            out["has_flex_unlim"] = user.get("has_flex_unlim")
+            out["plan_type"] = user.get("plan_type")
+        except Exception:  # noqa: BLE001
+            pass
+        return _jdump(out)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
 async def queue_status() -> str:
     """Snapshot of in-flight jobs across all accounts in the pool."""
     return _jdump(_pool().snapshot())
