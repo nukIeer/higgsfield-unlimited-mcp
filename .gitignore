@@ -1,0 +1,37 @@
+# Credentials — never commit
+.env
+.env.*
+!.env.example
+
+# Generated output
+higgsfield_output/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mp4
+*.mov
+*.webm
+*.mp3
+*.wav
+*.m4a
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

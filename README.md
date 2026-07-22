@@ -1,0 +1,296 @@
+# Higgsfield Unlimited MCP
+
+A complete [MCP](https://modelcontextprotocol.io) server for **Higgsfield AI** that
+calls the generation API in **unlimited mode**, bypassing the credit system used by
+the official Higgsfield MCP. Auth uses your existing browser session (Clerk JWT,
+auto-refreshed every 4 minutes).
+
+**What's covered:** image generation (32 models), video generation (31 models), audio
+(TTS), storyboards (multi-shot continuity), workspaces, media library, assets,
+favourites, generation history, account/plan info, job cancellation — everything the
+official Higgsfield MCP exposes, plus video, audio, storyboard, and cancel that the
+official MCP doesn't.
+
+> Requires an active Higgsfield subscription with **unlimited mode enabled**.
+
+---
+
+## Quick Install
+
+**Requirements:** Python 3.10+, Claude Code (or any MCP client)
+
+```bash
+pip install git+https://github.com/nukIeer/higgsfield-unlimited-mcp.git
+```
+
+Or with `uvx` (no install needed, runs ephemerally):
+
+```bash
+uvx --from git+https://github.com/nukIeer/higgsfield-unlimited-mcp.git higgsfield-unlimited-mcp
+```
+
+Then jump to [Setup](#setup) to wire up your credentials.
+
+---
+
+## Tools (31 total)
+
+### Auth & account
+| Tool | Description |
+|------|-------------|
+| `auth_status` | Verify Clerk credentials by fetching a fresh JWT. |
+| `account_info` | Plan info, all credit balances, `has_unlim` flag. |
+| `concurrent_state` | Concurrent-slot tier (4/8/12/16). |
+| `queue_status` | In-process job registry snapshot. |
+
+### Models
+| Tool | Description |
+|------|-------------|
+| `list_models` | All 60+ generation models, optionally filtered by category (image / video / audio). |
+| `get_aspect_dimensions` | Canonical pixel dims for an aspect ratio. |
+
+### Image generation
+| Tool | Description |
+|------|-------------|
+| `generate_image` | Single image — 32 models including nano-banana-2, flux-2, seedream-v4-5, openai-hazel, reve, z-image. Supports `input_files` for local-file auto-upload. |
+| `generate_image_batch` | Queue many prompts; runs up to `max_concurrent` in parallel. |
+| `generate_storyboard` | Multi-shot storyboard with character/style continuity (uses `nano-banana-2-shots`). |
+
+### Video generation
+| Tool | Description |
+|------|-------------|
+| `generate_video` | 31 models including seedance, kling/kling2-6, sora2-video, veo3/veo3-1, minimax-hailuo, wan2-2-video/wan2-5-video/wan2-6, image2video, infinite-talk. |
+
+### Audio
+| Tool | Description |
+|------|-------------|
+| `generate_audio` | Text-to-speech (`text2speech` model). |
+
+### Generic / advanced
+| Tool | Description |
+|------|-------------|
+| `generate_raw` | Escape hatch for any model with a custom params dict (face-swap, character-swap, upscale, inpaint, etc.). |
+
+### Job management
+| Tool | Description |
+|------|-------------|
+| `check_job` | Poll a single job (local + remote). |
+| `wait_for_job` | Block until a job finishes; optionally download. |
+| `cancel_job` | Cancel an in-progress job (`DELETE /jobs/{id}`). |
+| `list_jobs` | List jobs in the local registry. |
+| `download_job_result` | Re-fetch a completed job's results to disk. |
+| `show_generations` | Server-side recent generation history (`/jobs/accessible`). |
+
+### Workspaces
+| Tool | Description |
+|------|-------------|
+| `list_workspaces` | List all your workspaces. |
+| `workspace_details` | Active workspace info (id, name, type, role). |
+| `workspace_wallet` | Credit balance. |
+| `workspace_members` | Members of the active workspace. |
+| `workspace_usage` | Credit-usage chart. |
+
+### Media library
+| Tool | Description |
+|------|-------------|
+| `show_medias` | Paginated media library (images + videos). |
+| `media_upload` | Upload a local image/video for use as input on subsequent generations. |
+| `media_status` | Check status of media items by id. |
+| `media_download_batch` | Bulk download URLs by media id. |
+
+### Assets & favourites
+| Tool | Description |
+|------|-------------|
+| `list_assets` | List your assets. |
+| `list_favourites` | List your favourited assets. |
+| `like_asset` / `unlike_asset` | Add/remove asset from favourites. |
+
+---
+
+## Setup
+
+### 1. Get your Higgsfield credentials (~2 min)
+
+Open <https://higgsfield.ai> in Chrome while logged in.
+
+**`__client` cookie:**
+1. Open DevTools (`Cmd+Option+I` / `F12`)
+2. Application → Cookies → `https://higgsfield.ai`
+3. Copy the value of the `__client` cookie
+
+**Session ID:**
+1. DevTools → Console
+2. Run: `window.Clerk.session.id`
+3. Copy the result — it starts with `sess_`
+
+### 2. Install
+
+```bash
+pip install git+https://github.com/nukIeer/higgsfield-unlimited-mcp.git
+```
+
+To update later:
+
+```bash
+pip install --upgrade git+https://github.com/nukIeer/higgsfield-unlimited-mcp.git
+```
+
+### 3. Add to Claude Code
+
+Add this to your Claude Code MCP config (`~/.claude.json`, user-level). Paste your
+credentials into the `env` block — they never leave your machine.
+
+```json
+{
+  "mcpServers": {
+    "higgsfield-unlimited": {
+      "command": "python",
+      "args": ["-m", "higgsfield_unlimited_mcp"],
+      "env": {
+        "HIGGSFIELD_CLERK_COOKIE": "<paste your __client cookie here>",
+        "HIGGSFIELD_SESSION_ID": "sess_xxxxxxxxxxxxx",
+        "HIGGSFIELD_MAX_CONCURRENT": "4",
+        "HIGGSFIELD_DEFAULT_MODEL": "nano-banana-2",
+        "HIGGSFIELD_DEFAULT_RESOLUTION": "2k"
+      }
+    }
+  }
+}
+```
+
+Or register via the CLI:
+
+```bash
+claude mcp add higgsfield-unlimited -s user -- python -m higgsfield_unlimited_mcp
+```
+
+Then set the env vars in `~/.claude.json` as shown above.
+
+### 4. Verify it's working
+
+```bash
+# Full check: auth + API endpoints + 1 test image generation + download
+higgsfield-unlimited-verify
+
+# Auth + API checks only (no generation)
+higgsfield-unlimited-verify --skip-generate
+
+# Keep the test image after success
+higgsfield-unlimited-verify --keep-output
+```
+
+Or from inside Claude Code:
+
+> Use higgsfield-unlimited to check `auth_status`, then `account_info`.
+
+---
+
+## Configuration reference
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HIGGSFIELD_CLERK_COOKIE` | *(required)* | The `__client` cookie from your browser. |
+| `HIGGSFIELD_SESSION_ID` | *(required)* | `window.Clerk.session.id`. |
+| `HIGGSFIELD_MAX_CONCURRENT` | `4` | Max parallel jobs (match your plan tier: 4/8/12/16). |
+| `HIGGSFIELD_DEFAULT_MODEL` | `nano-banana-2` | Image model used when not specified. |
+| `HIGGSFIELD_DEFAULT_RESOLUTION` | `2k` | One of `1k`, `2k`, `4k`. |
+| `HIGGSFIELD_OUTPUT_DIR` | `./higgsfield_output` | Default download directory. |
+| `HIGGSFIELD_JWT_REFRESH_SECONDS` | `240` | How often to proactively refresh the JWT. |
+| `HIGGSFIELD_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
+
+---
+
+## Usage examples
+
+**Generate a single image:**
+> Generate a 2k 16:9 image: "ancient Egyptian temple at golden hour, cinematic lighting"
+
+**Batch storyboard (fire-and-forget):**
+> Generate this 11-shot storyboard at 2k 9:16, fire-and-forget.
+
+Calls `generate_image_batch(prompts=[...], wait=False)`, then check progress with `queue_status`.
+
+**Single video at Veo 3:**
+> Generate a 5-second 16:9 video with Veo 3: "drone shot of a desert pyramid at sunset"
+
+**Image-to-video with auto-upload (one step):**
+> Animate `./Assets/Character 1.png` with seedance for 5s, 720p, 16:9
+
+Calls `generate_video(model="seedance", input_files=["./Assets/Character 1.png"], ...)` — the file is uploaded automatically.
+
+**Storyboard with character continuity:**
+> Use `./Assets/Character 1.png` as the reference and generate this 5-shot storyboard at 2k 9:16
+
+**Cancel a runaway job:**
+> Cancel job `<id>`
+
+**Check plan & balances:**
+> What's my Higgsfield plan?
+
+Returns `has_unlim`, plan type, and all per-feature credit balances.
+
+---
+
+## How auth works
+
+Higgsfield's web app uses a short-lived JWT (~5 min TTL) issued by Clerk. The
+long-lived `__client` cookie lets us mint fresh JWTs on demand:
+
+```http
+POST https://clerk.higgsfield.ai/v1/client/sessions/{session_id}/tokens
+Cookie: __client=<your cookie>
+-> { "jwt": "..." }
+```
+
+The server caches the JWT and refreshes it proactively (every ~4 minutes). On a 401 it
+invalidates and retries once automatically.
+
+Unlimited mode is enabled by setting `"use_unlim": true` in both the `params` object and
+the top-level request body:
+
+```http
+POST https://fnf.higgsfield.ai/jobs/{model}
+Authorization: Bearer <jwt>
+
+{ "params": { "...": "...", "use_unlim": true }, "use_unlim": true }
+```
+
+See [`docs/EXTENDING.md`](docs/EXTENDING.md) for how to add new endpoints, and
+[`docs/MODEL_SCHEMAS.md`](docs/MODEL_SCHEMAS.md) for per-model required-field reference.
+
+> **Video model note:** Each video model has different required fields. When
+> `generate_video` returns a 422 error, the message tells you exactly which fields to add
+> via `extra_params`. You can also use `generate_raw` to pass the full params dict directly.
+
+---
+
+## Security
+
+- **Never commit your `.env` file.** It's in `.gitignore` by default.
+- Your `__client` cookie + session id are equivalent to your logged-in browser session.
+  Treat them like a password.
+- Credentials passed via MCP env config stay local — they are never sent anywhere except
+  Higgsfield's own API.
+- For team use: each member should set up with their own Higgsfield account and credentials.
+
+---
+
+## Notes on model ids & endpoints
+
+Higgsfield changes model ids and endpoint paths over time. This server is resilient to
+that:
+
+- The model registry in [`models.py`](higgsfield_unlimited_mcp/models.py) is for
+  **discovery + hints only** — `generate_raw` works with any model id the API accepts.
+- Read endpoints (account / workspace / media / assets) try a small list of candidate
+  paths and report which one worked, so a moved endpoint is a one-line fix.
+- Job responses are parsed tolerantly (see `docs/EXTENDING.md`).
+
+If something 404s or 422s, the returned JSON includes the status and body so you can
+adjust — see the docs.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
