@@ -86,6 +86,11 @@ class Config:
     request_timeout: float = field(
         default_factory=lambda: float(os.environ.get("HIGGSFIELD_REQUEST_TIMEOUT", "120"))
     )
+    # Minimum seconds between API requests *per account*, to stay under DataDome's
+    # bot-detection. A random jitter up to +50% is added so timing looks human.
+    min_request_interval: float = field(
+        default_factory=lambda: float(os.environ.get("HIGGSFIELD_MIN_REQUEST_INTERVAL", "1.5"))
+    )
 
     def validate(self) -> list[str]:
         """Return a list of human-readable problems, empty if config is usable."""

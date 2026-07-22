@@ -214,7 +214,9 @@ See [`docs/EXTENDING.md`](docs/EXTENDING.md) and
   like passwords.
 - Credentials stay local — sent only to Higgsfield's own API.
 - Rapid automated requests can trip DataDome (a browser verification / temporary IP flag).
-  Generate at a human pace; refresh the `datadome` cookie if you see 403s.
+  The client **throttles itself** — a minimum gap (+random jitter) between API calls per
+  account (`HIGGSFIELD_MIN_REQUEST_INTERVAL`, default 1.5s; raise to 2.5–3s if you still
+  see 403s). Refresh the `datadome` cookie if 403s persist.
 
 ## License
 

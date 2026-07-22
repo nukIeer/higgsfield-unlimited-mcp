@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import random
 import time
 from pathlib import Path
 from typing import Any
@@ -161,9 +162,26 @@ class HiggsfieldClient:
             },
         )
         self.auth = ClerkAuth(config, self._http)
+        # Per-account request pacing (anti-DataDome).
+        self._throttle_lock = asyncio.Lock()
+        self._next_allowed_ts = 0.0
 
     async def aclose(self) -> None:
         await self._http.aclose()
+
+    async def _throttle(self) -> None:
+        """Space out API calls on this account so we look human to DataDome."""
+        interval = self._config.min_request_interval
+        if interval <= 0:
+            return
+        async with self._throttle_lock:
+            now = time.monotonic()
+            wait = self._next_allowed_ts - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            # Schedule the next slot with a random jitter (+0–50%).
+            gap = interval + random.uniform(0, interval * 0.5)
+            self._next_allowed_ts = time.monotonic() + gap
 
     # --------------------------------------------------------------------- #
     # Core request with auth + 401 retry
@@ -178,6 +196,7 @@ class HiggsfieldClient:
         expect_json: bool = True,
     ) -> Any:
         for attempt in (1, 2):
+            await self._throttle()
             jwt = await self.auth.get_jwt(force=(attempt == 2))
             headers = {"Authorization": f"Bearer {jwt}"}
             if self._config.extra_cookies:
